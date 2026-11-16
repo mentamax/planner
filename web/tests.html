@@ -18,6 +18,7 @@
     for (const s of [localStorage, sessionStorage]) {
       Object.keys(s).filter(k => k.startsWith('planner-test.')).forEach(k => s.removeItem(k));
     }
+    indexedDB.deleteDatabase('planner-test-ink');
   </script>
   <script type="module" src="js/tests.js"></script>
 </body>

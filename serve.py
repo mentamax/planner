@@ -31,6 +31,7 @@ SCOPES = (
     "https://www.googleapis.com/auth/drive.appdata",  # メモの同期用（このアプリ専用の隠し領域だけ）
 )
 STATE_TTL = 600  # ログイン画面を開いてから戻ってくるまでの猶予（秒）
+QUIET = os.environ.get("PLANNER_QUIET") == "1"
 
 
 class AuthError(Exception):
@@ -255,6 +256,9 @@ def make_handler(auth, port):
         def log_request(self, code="-", size="-"):
             # ログイン直後の URL には認可コードが載るので、ログにはパスだけを残す
             path = urllib.parse.urlsplit(self.path).path
+            # 常駐させるとき（PLANNER_QUIET=1）は、ログが増え続けないよう API と失敗だけを残す
+            if QUIET and str(code).isdigit() and int(code) < 400 and not path.startswith("/api/"):
+                return
             self.log_message('"%s %s" %s', self.command, path, str(code))
 
         # ---- 振り分け ----

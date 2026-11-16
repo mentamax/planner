@@ -5,6 +5,7 @@ import { today, addDays, fmtDay } from '../dates.js';
 import { daySegments } from '../model.js';
 import { NoteBox, TaskRow, EventRow, QuickAdd } from '../ui.js';
 import { ProgressBar } from './board.js';
+import { InkPreview, NotebookButton } from './notebook.js';
 
 const Section = (title, meta, ...content) =>
   h(
@@ -57,7 +58,12 @@ export function TodayView() {
           overdue.length > 15 ? Empty(`ほか ${overdue.length - 15} 件`) : null,
         )
       : null,
-    Section('メモ', null, NoteBox(dayNoteKey(t), { placeholder: '今日のメモ…', cls: 'today-note', label: `${fmtDay(t)} のメモ` })),
+    Section(
+      'メモ',
+      NotebookButton(dayNoteKey(t)),
+      NoteBox(dayNoteKey(t), { placeholder: '今日のメモ…', cls: 'today-note', label: `${fmtDay(t)} のメモ` }),
+      InkPreview(dayNoteKey(t)),
+    ),
     Section(`明日　${fmtDay(tomorrow)}`, Meta(next.length ? `${next.length} 件` : ''), next.length ? next : Empty('予定・タスクはありません')),
   );
 }

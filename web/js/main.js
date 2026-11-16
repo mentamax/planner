@@ -1,6 +1,6 @@
 // アプリの外枠（ヘッダー・ビューの切り替え）と起動処理。
 import { h, mount } from './dom.js';
-import { state, subscribe, setView, setCursor, pendingCount } from './store.js';
+import { state, subscribe, setView, setCursor, setNoteScope, pendingCount } from './store.js';
 import { initSync, connect, syncNow, ensureWindow } from './sync.js';
 import { today, addDays, addMonths, startOfWeek, fmtMonth, fmtWeekRange, fmtDay, toHM } from './dates.js';
 import { icon, isPhone } from './ui.js';
@@ -9,12 +9,14 @@ import { WeekView } from './views/week.js';
 import { BoardView } from './views/board.js';
 import { SidePanel } from './views/side.js';
 import { TodayView } from './views/today.js';
+import { NotebookView, flushInk } from './views/notebook.js';
 import { openItemDialog, openSettings } from './dialogs.js';
 
 const VIEWS = [
   ['month', '月'],
   ['week', '週'],
   ['board', 'タスク'],
+  ['note', 'ノート'],
 ];
 
 function go(date) {
@@ -22,11 +24,18 @@ function go(date) {
   ensureWindow();
 }
 
-const step = dir => go(state.ui.view === 'month' ? addMonths(state.ui.cursor, dir) : addDays(state.ui.cursor, dir * 7));
+/** 前へ・次へ。表示中の単位（月 / 週 / ノートなら開いているページの単位）で動かす */
+function step(dir) {
+  const { view, cursor, noteScope } = state.ui;
+  const unit = view === 'note' ? noteScope : view === 'month' ? 'month' : 'week';
+  go(unit === 'month' ? addMonths(cursor, dir) : addDays(cursor, unit === 'day' ? dir : dir * 7));
+}
 
 function rangeTitle() {
-  const { view, cursor } = state.ui;
-  return view === 'month' ? fmtMonth(cursor) : fmtWeekRange(startOfWeek(cursor, state.settings.weekStart));
+  const { view, cursor, noteScope } = state.ui;
+  if (view === 'note' && noteScope === 'day') return `${cursor.slice(0, 4)}年${fmtDay(cursor)}`;
+  const monthly = view === 'month' || (view === 'note' && noteScope === 'month');
+  return monthly ? fmtMonth(cursor) : fmtWeekRange(startOfWeek(cursor, state.settings.weekStart));
 }
 
 function SyncChip() {
@@ -83,7 +92,7 @@ function Topbar() {
       'div',
       { class: 'actions' },
       SyncChip(),
-      h('button', { class: 'btn primary', onclick: () => openItemDialog() }, icon('plus', 16), '追加'),
+      h('button', { class: 'btn primary', 'aria-label': '予定・タスクを追加', onclick: () => openItemDialog() }, icon('plus', 16), h('span', { class: 'btn-label' }, '追加')),
       h('button', { class: 'btn icon-btn ghost', 'aria-label': '設定', title: '設定', onclick: openSettings }, icon('settings')),
     ),
   );
@@ -147,6 +156,11 @@ function App() {
     return h('div', { class: 'app widget' }, WidgetBar(), Banner(), h('div', { class: 'body widget-body', dataset: { sk: 'widget' } }, TodayView()));
   }
   const { view } = state.ui;
+  if (view === 'note') {
+    // ノートは画面いっぱいに使う（右パネルは出さない）
+    return h('div', { class: 'app' }, Topbar(), Banner(), h('div', { class: 'body view-note' }, NotebookView()));
+  }
+  flushInk(); // ノートを離れたら、書きかけの手書きをすぐ保存する
   const content = view === 'month' ? MonthView() : view === 'week' ? WeekView() : BoardView();
   return h(
     'div',
@@ -164,6 +178,13 @@ function App() {
       SidePanel(),
     ),
   );
+}
+
+const startNote = new URLSearchParams(location.search).get('note');
+if (!WIDGET && ['day', 'week', 'month'].includes(startNote)) {
+  state.ui.view = 'note';
+  setNoteScope(startNote);
+  history.replaceState(null, '', location.pathname + location.hash);
 }
 
 const app = mount(document.getElementById('app'), App);

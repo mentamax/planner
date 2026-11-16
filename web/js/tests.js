@@ -36,26 +36,41 @@ const server = {
   validTokens: new Set(['test-token']),
   // 同梱サーバー（serve.py）の認証 API の模擬
   backend: { connected: true, tokenCalls: 0, reauth: false, down: false },
-  // Google ドライブのアプリ専用領域（メモの保存先）の模擬
-  drive: { file: null, forbidden: false, saves: 0 },
+  // Google ドライブのアプリ専用領域（メモ・手書きの保存先）の模擬
+  drive: {
+    files: new Map(), // ID → { id, name, doc }
+    forbidden: false,
+    saves: 0,
+    seq: 0,
+    /** 文字のメモのファイル */
+    get file() {
+      return [...this.files.values()].find(f => f.name === 'planner-notes.json') || null;
+    },
+  },
 };
 
-function driveApi(path, method, rawBody) {
+function driveApi(path, method, rawBody, url) {
   const d = server.drive;
   if (d.forbidden) return json({ error: { message: 'Request had insufficient authentication scopes.' } }, 403);
-  if (path === '/drive/v3/files' && method === 'GET') return json({ files: d.file ? [{ id: d.file.id }] : [] });
-  if (path === '/upload/drive/v3/files' && method === 'POST') {
-    // multipart の 2 つ目の部分がファイルの中身
-    const parts = rawBody.split(/\r\n\r\n/);
-    d.file = { id: 'notes-file-1', doc: JSON.parse(parts[2].split('\r\n--')[0]) };
-    d.saves++;
-    return json({ id: d.file.id });
+  let m;
+  if (path === '/drive/v3/files' && method === 'GET') {
+    const name = (url.searchParams.get('q') || '').match(/name = '([^']+)'/)?.[1];
+    return json({ files: [...d.files.values()].filter(f => f.name === name).map(f => ({ id: f.id })) });
   }
-  if (d.file && path === `/drive/v3/files/${d.file.id}` && method === 'GET') return json(d.file.doc);
-  if (d.file && path === `/upload/drive/v3/files/${d.file.id}` && method === 'PATCH') {
-    d.file.doc = JSON.parse(rawBody);
+  if (path === '/upload/drive/v3/files' && method === 'POST') {
+    // multipart: 1 つ目がファイル名など、2 つ目がファイルの中身
+    const parts = rawBody.split(/\r\n\r\n/);
+    const meta = JSON.parse(parts[1].split('\r\n--')[0]);
+    const file = { id: `file-${++d.seq}`, name: meta.name, doc: JSON.parse(parts[2].split('\r\n--')[0]) };
+    d.files.set(file.id, file);
     d.saves++;
-    return json({ id: d.file.id });
+    return json({ id: file.id });
+  }
+  if ((m = path.match(/^\/drive\/v3\/files\/([^/]+)$/)) && method === 'GET' && d.files.has(m[1])) return json(d.files.get(m[1]).doc);
+  if ((m = path.match(/^\/upload\/drive\/v3\/files\/([^/]+)$/)) && method === 'PATCH' && d.files.has(m[1])) {
+    d.files.get(m[1]).doc = JSON.parse(rawBody);
+    d.saves++;
+    return json({ id: m[1] });
   }
   return json({ error: { message: 'Not Found' } }, 404);
 }
@@ -102,7 +117,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (!server.validTokens.has(String(init.headers?.Authorization).replace('Bearer ', ''))) return json({ error: { message: 'Invalid Credentials' } }, 401);
 
   let m;
-  if (path.startsWith('/drive/') || path.startsWith('/upload/drive/')) return driveApi(path, method, init.body);
+  if (path.startsWith('/drive/') || path.startsWith('/upload/drive/')) return driveApi(path, method, init.body, url);
   if (path === '/calendar/v3/users/me/calendarList') return json({ items: server.calendars });
   if (path === '/tasks/v1/users/@me/lists') return json({ items: server.lists });
   if ((m = path.match(/^\/calendar\/v3\/calendars\/([^/]+)\/events(?:\/(.+))?$/))) {
@@ -183,6 +198,22 @@ function pureTests() {
   eq('メモ: 消したことも伝わる（古い削除記録は片付ける）', [m.doc.notes['d:2026-11-17'], m.doc.notes['d:2026-11-18'], 'bad key' in m.doc.notes], [undefined, { t: '', u: now - 1000 }, false]);
   eq('メモ: 差がなければ書き込まない', M.mergeNotes({ notes: { 'd:2026-11-16': '同じ' }, times: { 'd:2026-11-16': 50 } }, { version: 1, notes: { 'd:2026-11-16': { t: '同じ', u: 50 } } }, now).upload, false);
   eq('メモ: 初回はファイルを作る', M.mergeNotes({ notes: {}, times: {} }, null, now).upload, true);
+  eq('メモ: 月のメモも同期の対象', M.mergeNotes({ notes: { 'm:2026-11': '今月' }, times: { 'm:2026-11': 5 } }, { version: 1, notes: {} }, now).doc.notes, { 'm:2026-11': { t: '今月', u: 5 } });
+
+  // 手書き
+  const plan = M.mergeInkIndex(
+    { 'd:2026-11-13': { u: 200, n: 3 }, 'w:2026-11-09': { u: 100, n: 1 }, 'm:2026-11': { u: 50, n: 2 } },
+    { 'd:2026-11-13': { u: 150, f: 'a' }, 'w:2026-11-09': { u: 300, f: 'b' }, 'm:2026-11': { u: 50, f: 'c' }, 'd:2026-11-20': { u: 10, f: 'd' }, 'bad': { u: 9, f: 'x' } },
+  );
+  eq('手書き: 新しいほうへそろえる', [plan.upload, plan.download.sort()], [['d:2026-11-13'], ['d:2026-11-20', 'w:2026-11-09']]);
+  const line = { c: 0, w: 2, p: [1000, 1000, 50, 2000, 1000, 50, 3000, 1000, 50] }; // (100,100) から (300,100) への横線
+  const far = { c: 1, w: 2, p: [1000, 5000, 50] };
+  eq('手書き: 描かれている範囲', M.inkBounds({ strokes: [line, far] }), [100, 100, 300, 500]);
+  eq('手書き: 何もなければ範囲なし', M.inkBounds({ strokes: [] }), null);
+  eq('手書き: プレビュー用の線', M.strokePath(line), 'M100 100Q200 100 250 100L300 100');
+  eq('消しゴム: 線の途中をなぞっても消える', [M.eraseStrokes([line, far], 150, 105, 10).length, M.eraseStrokes([line, far], 150, 105, 10)[0] === far], [1, true]);
+  const both = [line, far];
+  eq('消しゴム: 離れた場所では何も消さない', M.eraseStrokes(both, 600, 600, 10) === both, true);
 }
 
 // ---- 変換 ----
@@ -219,6 +250,7 @@ async function mappingTests() {
 async function syncTests() {
   const S = await import('./store.js');
   const Sync = await import('./sync.js');
+  const g = await import('./google.js');
   const { state } = S;
   const t = D.today();
   const calls = prefix => server.log.filter(l => l.startsWith(prefix)).length;
@@ -316,6 +348,28 @@ async function syncTests() {
   server.drive.forbidden = false;
   await Sync.syncNow();
   eq('許可が付けばメモの同期が再開', state.sync.notesError, null);
+
+  // 手書きの端末間同期（メモごとに 1 ファイル）
+  const Ink = await import('./ink.js');
+  const inkKey = `d:${D.addDays(t, 3)}`;
+  eq('手書きがなければ印は出ない', [S.hasInk(inkKey), S.hasNote(inkKey)], [false, false]);
+  await Ink.saveInk({ key: inkKey, u: Date.now(), h: 1300, strokes: [{ c: 0, w: 2.4, p: [100, 100, 50, 300, 300, 50] }] });
+  eq('手書きがあるメモには印が出る', [S.hasInk(inkKey), S.hasNote(inkKey)], [true, true]);
+  await Sync.syncNow();
+  const inkFile = () => [...server.drive.files.values()].find(f => f.name === g.inkFileName(inkKey));
+  eq('手書きが Google ドライブに保存される', [inkFile()?.doc.strokes.length, server.drive.file.doc.ink[inkKey].f === inkFile()?.id, state.sync.notesError], [1, true, null]);
+  const inkSaves = server.drive.saves;
+  await Sync.syncNow();
+  eq('手書きも変更がなければ送らない', server.drive.saves, inkSaves);
+
+  // iPad で書き足した内容を受け取る
+  inkFile().doc = { ...inkFile().doc, strokes: [...inkFile().doc.strokes, { c: 1, w: 5, p: [10, 10, 50] }] };
+  server.drive.file.doc.ink[inkKey].u = Date.now() + 60_000;
+  await Sync.syncNow();
+  eq('他の端末で書いた手書きを取り込む', [(await Ink.loadInk(inkKey)).strokes.length, state.ink[inkKey].n], [2, 2]);
+  await Ink.saveInk({ ...(await Ink.loadInk(inkKey)), strokes: [], u: Date.now() + 120_000 });
+  await Sync.syncNow();
+  eq('全部消したことも伝わる', [inkFile().doc.strokes.length, S.hasInk(inkKey)], [0, false]);
 
   // 接続切れ
   server.unauthorized = true;

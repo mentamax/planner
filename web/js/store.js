@@ -1,6 +1,6 @@
 // アプリの状態と保存（localStorage）。画面は subscribe で変更を受け取って描き直す。
 import { today, mondayOf } from './dates.js';
-import { buildDayIndex } from './model.js';
+import { buildDayIndex, NOTE_KEY } from './model.js';
 import { DEFAULT_CLIENT_ID } from './config.js';
 
 // テストページ（tests.html）は別の保存先を使い、実データに触れない
@@ -9,6 +9,7 @@ const KEYS = {
   items: `${NS}.items.v1`,
   notes: `${NS}.notes.v1`,
   noteTimes: `${NS}.noteTimes.v1`,
+  ink: `${NS}.ink.v1`,
   settings: `${NS}.settings.v1`,
   google: `${NS}.google.v1`,
   ui: `${NS}.ui.v1`,
@@ -43,10 +44,16 @@ export const state = {
   notes: read(KEYS.notes, {}),
   /** メモごとの最終更新時刻（ミリ秒）。端末間の同期で「新しいほうを残す」ために使う。消したメモの時刻も残す */
   noteTimes: read(KEYS.noteTimes, {}),
+  /** 手書きメモの目次。キー → { u: 更新時刻, n: 線の本数 }。線そのものは大きいので IndexedDB に置く（ink.js） */
+  ink: read(KEYS.ink, {}),
   settings: { ...DEFAULT_SETTINGS, ...read(KEYS.settings, {}) },
   calendars: savedGoogle.calendars || [],
   taskLists: savedGoogle.taskLists || [],
-  ui: { view: ['month', 'week', 'board'].includes(savedUi.view) ? savedUi.view : 'week', cursor: today() },
+  ui: {
+    view: ['month', 'week', 'board', 'note'].includes(savedUi.view) ? savedUi.view : 'week',
+    cursor: today(),
+    noteScope: ['day', 'week', 'month'].includes(savedUi.noteScope) ? savedUi.noteScope : 'day', // ノート画面で開くページ
+  },
   auth: { status: 'disconnected', error: null }, // disconnected | connecting | connected | expired
   /** 同梱サーバーの認証 API の状態。{ hasSecret, connected, clientId, redirectUri } / API が無ければ null */
   backend: null,
@@ -89,7 +96,8 @@ export function persist() {
     }
     if (dirty.has('settings')) write(KEYS.settings, state.settings);
     if (dirty.has('google')) write(KEYS.google, { calendars: state.calendars, taskLists: state.taskLists });
-    if (dirty.has('ui')) write(KEYS.ui, { view: state.ui.view });
+    if (dirty.has('ui')) write(KEYS.ui, { view: state.ui.view, noteScope: state.ui.noteScope });
+    if (dirty.has('ink')) write(KEYS.ink, state.ink);
     if (dirty.has('items')) {
       try {
         write(KEYS.items, state.items);
@@ -221,7 +229,22 @@ export function restoreItem(snapshot) {
 
 export const dayNoteKey = date => `d:${date}`;
 export const weekNoteKey = date => `w:${mondayOf(date, state.settings.weekStart)}`;
-export const hasNote = key => !!state.notes[key]?.trim();
+export const monthNoteKey = date => `m:${date.slice(0, 7)}`;
+export const hasInk = key => (state.ink[key]?.n || 0) > 0;
+/** 文字か手書きのどちらかが書かれているか */
+export const hasNote = key => !!state.notes[key]?.trim() || hasInk(key);
+
+const inkHooks = new Set();
+/** 手書きがこの端末で書き換えられたときに呼ばれる（端末間同期の起点） */
+export const onInkChange = fn => inkHooks.add(fn);
+
+/** 手書きの目次を更新する。fromRemote = 他の端末から届いた分（同期を起こし直さない） */
+export function setInkMeta(key, meta, fromRemote = false) {
+  state.ink[key] = meta;
+  dirty.add('ink');
+  schedulePersist();
+  if (!fromRemote) inkHooks.forEach(fn => fn());
+}
 
 // 時刻の記録がなかった頃のメモには、いまの時刻を付ける（同期で古い扱いにされて消えないように）
 for (const key of Object.keys(state.notes)) {
@@ -264,6 +287,11 @@ export function setView(view) {
   emit('ui');
 }
 
+export function setNoteScope(scope) {
+  state.ui.noteScope = scope;
+  emit('ui');
+}
+
 export function setCursor(date) {
   state.ui.cursor = date;
   emit();
@@ -290,7 +318,7 @@ export function exportData() {
 
 export function importData(data) {
   if (!data || data.app !== 'planner') throw new Error('Planner のバックアップファイルではありません');
-  const notes = Object.entries(data.notes || {}).filter(([k, v]) => /^[dw]:\d{4}-\d{2}-\d{2}$/.test(k) && typeof v === 'string');
+  const notes = Object.entries(data.notes || {}).filter(([k, v]) => NOTE_KEY.test(k) && typeof v === 'string');
   Object.assign(state.notes, Object.fromEntries(notes));
   for (const [key] of notes) state.noteTimes[key] = Date.now();
   const existing = new Set(state.items.map(i => i.id));

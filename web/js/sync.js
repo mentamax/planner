@@ -1,8 +1,9 @@
 // Google との接続状態の管理と、双方向同期（未送信の変更を送る → Google の最新を取り込む）。
 import * as g from './google.js';
 import * as backend from './backend.js';
-import { state, emit, persist, onMutation, onNoteChange, applyRemoteNotes, findItem } from './store.js';
-import { mergeRemote, mergeNotes } from './model.js';
+import { state, emit, persist, onMutation, onNoteChange, onInkChange, applyRemoteNotes, findItem } from './store.js';
+import { mergeRemote, mergeNotes, mergeInkIndex } from './model.js';
+import { loadInk, saveInk } from './ink.js';
 import { today, addDays, fromYMD } from './dates.js';
 
 const AUTO_SYNC_MS = 5 * 60_000;
@@ -175,7 +176,30 @@ async function syncNotes() {
     // 通信中に書かれた分も含めて、いまの手元の内容と突き合わせる
     const merged = mergeNotes({ notes: state.notes, times: state.noteTimes }, file.doc);
     applyRemoteNotes(merged.incoming);
-    if (merged.upload) await g.saveNotesFile(file.id, merged.doc);
+
+    // 手書きはメモごとに別ファイル。目次（file.doc.ink）を見て、新しいほうへそろえる
+    const doc = { ...merged.doc, ink: { ...(file.doc?.ink || {}) } };
+    const plan = mergeInkIndex(state.ink, doc.ink);
+    let upload = merged.upload;
+    for (const key of plan.download) {
+      try {
+        const data = await g.driveRead(doc.ink[key].f);
+        if (data?.key === key) await saveInk({ ...data, u: doc.ink[key].u }, { fromRemote: true });
+      } catch (e) {
+        if (e instanceof g.AuthError) throw e; // それ以外（ファイルが消えていた等）は次回に回す
+      }
+    }
+    for (const key of plan.upload) {
+      const ink = await loadInk(key);
+      if (!ink) continue;
+      const name = g.inkFileName(key);
+      const id = await g.driveWrite(doc.ink[key]?.f || (await g.driveFind(name)), name, ink);
+      doc.ink[key] = { u: ink.u, f: id };
+      upload = true;
+    }
+
+    if (upload) await g.saveNotesFile(file.id, doc);
+    if (plan.download.length) emit();
     if (state.sync.notesError) state.sync.notesError = null;
   } catch (e) {
     if (e instanceof g.AuthError) throw e;
@@ -355,11 +379,13 @@ export async function initSync() {
     clearTimeout(pushTimer);
     pushTimer = setTimeout(pushNow, 900);
   });
-  onNoteChange(() => {
+  const notesSoon = () => {
     if (state.auth.status !== 'connected') return;
     clearTimeout(notesTimer);
     notesTimer = setTimeout(notesNow, 4000); // 書き終わって少し経ってから送る
-  });
+  };
+  onNoteChange(notesSoon);
+  onInkChange(notesSoon);
 
   const stale = () => !state.sync.lastSync || Date.now() - state.sync.lastSync > 2 * 60_000;
   const whenBack = () => {

@@ -214,37 +214,57 @@ export const deleteTask = (listId, taskId) =>
   api(`${TASKS}/lists/${enc(listId)}/tasks/${enc(taskId)}`, { method: 'DELETE' });
 
 // ---- メモの保存先（Google ドライブのアプリ専用領域） ----
+// 文字のメモは 1 つのファイル（planner-notes.json）に、手書きはメモごとに 1 ファイルずつ置く。
 
 const NOTES_FILE = 'planner-notes.json';
+export const inkFileName = key => `planner-ink-${key.replace(':', '_')}.json`;
 
-/** { id, doc }。まだファイルが無ければ { id: null, doc: null } */
-export async function loadNotesFile() {
+/** 名前からファイル ID を探す。無ければ null */
+export async function driveFind(name) {
   const list = await api(`${DRIVE}/files`, {
-    query: { spaces: 'appDataFolder', q: `name = '${NOTES_FILE}'`, orderBy: 'modifiedTime desc', pageSize: 10, fields: 'files(id)' },
+    query: { spaces: 'appDataFolder', q: `name = '${name}'`, orderBy: 'modifiedTime desc', pageSize: 10, fields: 'files(id)' },
   });
-  const id = list?.files?.[0]?.id || null;
-  if (!id) return { id: null, doc: null };
-  const doc = await api(`${DRIVE}/files/${enc(id)}`, { query: { alt: 'media' } });
-  return { id, doc: doc && typeof doc === 'object' ? doc : null };
+  return list?.files?.[0]?.id || null;
 }
 
-export async function saveNotesFile(id, doc) {
+/** JSON ファイルの中身を読む */
+export async function driveRead(id) {
+  const data = await api(`${DRIVE}/files/${enc(id)}`, { query: { alt: 'media' } });
+  return data && typeof data === 'object' ? data : null;
+}
+
+/** JSON ファイルを書く。id があれば上書き、無ければ（または消えていれば）新しく作る。ファイル ID を返す */
+export async function driveWrite(id, name, data) {
   if (id) {
-    return api(`${DRIVE_UPLOAD}/files/${enc(id)}`, { method: 'PATCH', query: { uploadType: 'media', fields: 'id' }, body: doc });
+    try {
+      await api(`${DRIVE_UPLOAD}/files/${enc(id)}`, { method: 'PATCH', query: { uploadType: 'media', fields: 'id' }, body: data });
+      return id;
+    } catch (e) {
+      if (e.status !== 404) throw e;
+    }
   }
   const boundary = `planner-${Math.random().toString(36).slice(2)}`;
   const part = (type, content) => `--${boundary}\r\nContent-Type: ${type}\r\n\r\n${content}\r\n`;
   const raw =
-    part('application/json; charset=UTF-8', JSON.stringify({ name: NOTES_FILE, parents: ['appDataFolder'] })) +
-    part('application/json; charset=UTF-8', JSON.stringify(doc)) +
+    part('application/json; charset=UTF-8', JSON.stringify({ name, parents: ['appDataFolder'] })) +
+    part('application/json; charset=UTF-8', JSON.stringify(data)) +
     `--${boundary}--`;
-  return api(`${DRIVE_UPLOAD}/files`, {
+  const created = await api(`${DRIVE_UPLOAD}/files`, {
     method: 'POST',
     query: { uploadType: 'multipart', fields: 'id' },
     raw,
     contentType: `multipart/related; boundary=${boundary}`,
   });
+  return created.id;
 }
+
+/** { id, doc }。まだファイルが無ければ { id: null, doc: null } */
+export async function loadNotesFile() {
+  const id = await driveFind(NOTES_FILE);
+  return id ? { id, doc: await driveRead(id) } : { id: null, doc: null };
+}
+
+export const saveNotesFile = (id, doc) => driveWrite(id, NOTES_FILE, doc);
 
 // ---- 変換（Google の形式 ⇔ アプリのアイテム） ----
 

@@ -137,7 +137,8 @@ export function shiftDates(item, fromDate, toDate) {
   };
 }
 
-const NOTE_KEY = /^[dw]:\d{4}-\d{2}-\d{2}$/;
+/** メモのキー: d:日付（日）/ w:月曜の日付（週）/ m:年-月（月） */
+export const NOTE_KEY = /^(?:[dw]:\d{4}-\d{2}-\d{2}|m:\d{4}-\d{2})$/;
 const DELETED_NOTE_TTL = 180 * 86400_000;
 
 /**
@@ -175,4 +176,87 @@ export function mergeNotes(local, remoteDoc, now = Date.now()) {
     merged[key] = { t: text, u: time };
   }
   return { incoming, doc: { version: 1, notes: merged }, upload };
+}
+
+// ---- 手書きメモ ----
+// 1 ページの手書き: { key, u: 更新時刻, h: ページの高さ, strokes: [{ c: 色番号, w: 太さ, p: [x, y, 筆圧, x, y, 筆圧, …] }] }
+// 座標はページ幅 1000 を基準にした値の 10 倍（整数）、筆圧は 100 倍（整数）で持つ。
+
+/**
+ * 手元の目次と Google ドライブ上の目次を比べ、受け取るものと送るものを決める。
+ *   local:  { キー: { u, n } }     remote: { キー: { u, f: ファイルID } }
+ */
+export function mergeInkIndex(local, remote) {
+  const download = [];
+  const upload = [];
+  for (const key of new Set([...Object.keys(local || {}), ...Object.keys(remote || {})])) {
+    if (!NOTE_KEY.test(key)) continue;
+    const l = local?.[key]?.u || 0;
+    const r = remote?.[key]?.u || 0;
+    if (r > l && remote[key].f) download.push(key);
+    else if (l > r) upload.push(key);
+  }
+  return { download, upload };
+}
+
+/** 線が描かれている範囲 [x0, y0, x1, y1]（ページの座標）。何もなければ null */
+export function inkBounds(doc) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const stroke of doc?.strokes || []) {
+    for (let i = 0; i + 2 < stroke.p.length; i += 3) {
+      const x = stroke.p[i] / 10;
+      const y = stroke.p[i + 1] / 10;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  return x0 === Infinity ? null : [x0, y0, x1, y1];
+}
+
+/** 1 本の線を SVG の path（d 属性）にする。小さなプレビュー用で、筆圧による太さの変化は省く */
+export function strokePath(stroke) {
+  const p = stroke.p;
+  const n = Math.floor(p.length / 3);
+  if (!n) return '';
+  const pt = i => [p[i * 3] / 10, p[i * 3 + 1] / 10];
+  const f = v => Math.round(v * 10) / 10;
+  const [sx, sy] = pt(0);
+  if (n === 1) return `M${f(sx)} ${f(sy)}l0.1 0`;
+  let d = `M${f(sx)} ${f(sy)}`;
+  for (let i = 1; i < n - 1; i++) {
+    const [cx, cy] = pt(i);
+    const [nx, ny] = pt(i + 1);
+    d += `Q${f(cx)} ${f(cy)} ${f((cx + nx) / 2)} ${f((cy + ny) / 2)}`;
+  }
+  const [ex, ey] = pt(n - 1);
+  return `${d}L${f(ex)} ${f(ey)}`;
+}
+
+/** 消しゴム: (x, y) から半径 r 以内を通る線を除いた配列を返す。変化がなければ元の配列をそのまま返す */
+export function eraseStrokes(strokes, x, y, r) {
+  const hit = stroke => {
+    const p = stroke.p;
+    const reach = r + stroke.w;
+    for (let i = 0; i + 2 < p.length; i += 3) {
+      const ax = p[i] / 10;
+      const ay = p[i + 1] / 10;
+      if (i + 5 >= p.length) return Math.hypot(ax - x, ay - y) <= reach;
+      // 点と点の間（線分）との距離で判定する
+      const bx = p[i + 3] / 10;
+      const by = p[i + 4] / 10;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) : 0;
+      if (Math.hypot(ax + t * dx - x, ay + t * dy - y) <= reach) return true;
+    }
+    return false;
+  };
+  const kept = strokes.filter(s => !hit(s));
+  return kept.length === strokes.length ? strokes : kept;
 }
