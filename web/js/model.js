@@ -260,3 +260,33 @@ export function eraseStrokes(strokes, x, y, r) {
   const kept = strokes.filter(s => !hit(s));
   return kept.length === strokes.length ? strokes : kept;
 }
+
+/**
+ * 書き終えた線をなめらかに整える。各点を前後の点となじませて、ペン位置の細かな揺れ（ガタつき）を取る。
+ * 線の両端と、向きが大きく変わる点（文字の角・折り返し）は動かさない。
+ *   p: [x, y, 筆圧, x, y, 筆圧, …]（整数）。新しい配列を返す
+ */
+export function smoothStroke(p, passes = 2) {
+  const n = Math.floor(p.length / 3);
+  if (n < 5) return p;
+  let cur = p;
+  for (let pass = 0; pass < passes; pass++) {
+    const out = cur.slice();
+    for (let i = 1; i < n - 1; i++) {
+      // 角かどうかは、少し離れた点どうしの向きで判定する（隣どうしだと揺れを角と見間違える）
+      const a = Math.max(i - 3, 0) * 3;
+      const b = Math.min(i + 3, n - 1) * 3;
+      const c = i * 3;
+      const inX = cur[c] - cur[a];
+      const inY = cur[c + 1] - cur[a + 1];
+      const outX = cur[b] - cur[c];
+      const outY = cur[b + 1] - cur[c + 1];
+      const inLen = Math.hypot(inX, inY);
+      const outLen = Math.hypot(outX, outY);
+      if (inLen && outLen && (inX * outX + inY * outY) / (inLen * outLen) < 0.5) continue; // 60 度以上の折れは角として残す
+      for (let k = 0; k < 3; k++) out[c + k] = Math.round((cur[c - 3 + k] + 2 * cur[c + k] + cur[c + 3 + k]) / 4);
+    }
+    cur = out;
+  }
+  return cur;
+}

@@ -176,7 +176,7 @@ function showDiagnostics() {
     if (!view.diag.isConnected) return;
     const d = pad.diagnostics();
     const line = (l, i) =>
-      `線${i + 1}: 種類=${l.type} 長さ=${l.ms}ms 通知=${l.movesPerSec}回/秒 位置=${l.samplesPerSec}点/秒（1通知あたり${l.perMove}点） 記録=${l.points}点 遅れ=${l.lagMs}ms 筆圧=${l.pressure[0]}〜${l.pressure[1]} 先読み=${l.predicted ? 'あり' : 'なし'}`;
+      `線${i + 1}: 種類=${l.type} 長さ=${l.ms}ms 通知=${l.movesPerSec}回/秒 位置=${l.samplesPerSec}点/秒（1通知あたり${l.perMove}点） 記録=${l.points}点 遅れ=${l.lagMs}ms 筆圧=${l.pressure[0]}〜${l.pressure[1]} 先読み=${l.predicted ? 'あり' : 'なし'} 順序の乱れ=${l.backwards}`;
     view.diagText.textContent = [
       `細かい動きの取得: ${yes(d.coalesced)} / 先読み: ${yes(d.predicted)} / ペンの使用: ${d.penSeen ? 'あり' : 'まだなし'}`,
       `キャンバス: ${d.canvas} / ページ上の線の数: ${d.strokes}`,

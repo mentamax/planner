@@ -212,6 +212,14 @@ function pureTests() {
   eq('手書き: 何もなければ範囲なし', M.inkBounds({ strokes: [] }), null);
   eq('手書き: プレビュー用の線', M.strokePath(line), 'M100 100Q200 100 250 100L300 100');
   eq('消しゴム: 線の途中をなぞっても消える', [M.eraseStrokes([line, far], 150, 105, 10).length, M.eraseStrokes([line, far], 150, 105, 10)[0] === far], [1, true]);
+  // 書き終えた線の整形: 揺れは減らし、端と角は動かさない
+  const zig = []; for (let i = 0; i <= 20; i++) zig.push(1000 + i * 15, 1000 + (i % 2 ? 6 : -6), 30); // 横線に上下 ±0.6 の揺れ
+  const sm = M.smoothStroke(zig);
+  const spread = arr => { const ys = arr.filter((_, i) => i % 3 === 1); return Math.max(...ys) - Math.min(...ys); };
+  eq('整形: 揺れが小さくなり、両端は動かない', [spread(sm.slice(9, -9)) <= 2, sm.slice(0, 2), sm.slice(-3, -1)], [true, zig.slice(0, 2), zig.slice(-3, -1)]);
+  const corner = []; for (let i = 0; i <= 10; i++) corner.push(1000 + i * 20, 1000, 30); for (let i = 1; i <= 10; i++) corner.push(1200, 1000 + i * 20, 30); // 直角に折れる線
+  eq('整形: 角の点は動かさない', M.smoothStroke(corner).slice(30, 32), [1200, 1000]);
+  eq('整形: 短い線はそのまま', M.smoothStroke([0, 0, 30, 10, 10, 30]) , [0, 0, 30, 10, 10, 30]);
   const both = [line, far];
   eq('消しゴム: 離れた場所では何も消さない', M.eraseStrokes(both, 600, 600, 10) === both, true);
 }
