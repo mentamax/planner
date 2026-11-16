@@ -1,9 +1,21 @@
 // オフラインでも開けるようにするためのサービスワーカー（インターネット上に置いた版でだけ登録する）。
-// 方針は「まずネットワーク、だめならキャッシュ」。つながっている間は常に最新のファイルを使うので、
-// 更新が反映されないという事故が起きない。電波がないときは、最後に開いたときのファイルで起動する。
+// 方針は「まずネットワーク（毎回最新を確認）、だめならキャッシュ」。つながっている間は常に最新の
+// ファイルを使うので、更新が反映されないという事故が起きない。電波がないときは、最後に開いたときのファイルで起動する。
 // Google との通信（別のサイト宛て）には一切関わらない。
 
-const CACHE = 'planner-shell-v1';
+const CACHE = 'planner-shell-v2';
+
+/**
+ * サーバーに「変わっていないか」を毎回たずねて取得する。
+ * 置き場所（GitHub Pages）はファイルを 10 分間キャッシュさせるので、そのままだと更新直後に
+ * 新旧のファイルが混ざる。変わっていなければ中身は送られてこないので、通信量はほぼ増えない。
+ */
+async function fetchFresh(req) {
+  if (req.mode !== 'navigate') return fetch(req, { cache: 'no-cache' });
+  // ページの読み込みは同じ形で作り直せないので、URL から取り直す
+  const res = await fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' });
+  return res.redirected ? fetch(req) : res;
+}
 
 self.addEventListener('install', () => self.skipWaiting());
 
@@ -22,7 +34,7 @@ self.addEventListener('fetch', event => {
   if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.includes('/api/')) return;
 
   event.respondWith(
-    fetch(req)
+    fetchFresh(req)
       .then(res => {
         if (res.ok) {
           const copy = res.clone();
