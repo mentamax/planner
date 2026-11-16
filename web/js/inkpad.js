@@ -264,7 +264,7 @@ export function createInkPad({ onChange, onState, onPen }) {
   // ---- 診断用の計測（ノートの「診断」表示で使う。書き心地に問題があるときの原因調べ用） ----
 
   let live1 = null; // いま書いている線の計測
-  let lastStroke = null; // 直前に書いた線の計測結果
+  const recent = []; // 直近に書いた線の計測結果（新しい順・3 本まで）
 
   function measure(e, sampleCount) {
     if (!live1) return;
@@ -280,7 +280,7 @@ export function createInkPad({ onChange, onState, onPen }) {
   function closeMeasure(points) {
     if (!live1) return;
     const seconds = Math.max(live1.t1 - live1.t0, 1) / 1000;
-    lastStroke = {
+    recent.unshift({
       type: live1.type,
       ms: Math.round(seconds * 1000),
       movesPerSec: Math.round(live1.moves / seconds),
@@ -289,7 +289,9 @@ export function createInkPad({ onChange, onState, onPen }) {
       lagMs: live1.moves ? Math.round(live1.lag / live1.moves) : 0,
       pressure: [Math.round(live1.pMin * 100) / 100, Math.round(live1.pMax * 100) / 100],
       predicted: live1.predicted,
-    };
+      perMove: live1.moves ? Math.round((live1.samples / live1.moves) * 10) / 10 : 0,
+    });
+    recent.length = Math.min(recent.length, 3);
     live1 = null;
   }
 
@@ -517,7 +519,7 @@ export function createInkPad({ onChange, onState, onPen }) {
         canvas: `${el.clientWidth}×${el.clientHeight}（内部 ${base.width}×${base.height}・倍率 ${window.devicePixelRatio}）`,
         strokes: doc?.strokes.length ?? 0,
         penSeen: pen.seen,
-        last: lastStroke,
+        recent: [...recent],
       };
     },
     undo() {

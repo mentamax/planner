@@ -6,7 +6,7 @@ import { fmtDay, fmtMonth, fmtMD, weekDates, isoWeek, mondayOf, today } from '..
 import { inkBounds, strokePath } from '../model.js';
 import { loadInk, cachedInk, saveInk, blankInk, onRemoteInk, PAGE_W } from '../ink.js';
 import { createInkPad, tool, pen, COLORS, COLOR_NAMES, WIDTHS } from '../inkpad.js';
-import { NoteBox, icon } from '../ui.js';
+import { NoteBox, icon, toast } from '../ui.js';
 
 const SCOPES = [
   ['day', '日'],
@@ -148,14 +148,23 @@ let diagTimer = 0;
 
 function build() {
   const bar = h('div', { class: 'nb-bar' });
-  const diag = h('pre', { class: 'nb-diag', hidden: true });
+  const diagText = h('pre', { class: 'nb-diagtext' });
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(diagText.textContent);
+      toast('診断の内容をコピーしました。チャットに貼り付けてください');
+    } catch {
+      toast('コピーできませんでした。スクリーンショットで送ってください');
+    }
+  };
+  const diag = h('div', { class: 'nb-diag', hidden: true }, diagText, h('button', { class: 'btn small', onclick: copy }, '診断をコピー'));
   const title = h('h2', { class: 'nb-title' });
   const textHost = h('div', { class: 'nb-texthost' });
   const extend = h('button', { class: 'btn small nb-extend', dataset: { nb: 'extend' }, onclick: () => pad.extend() }, icon('plus', 14), 'ページを下に伸ばす');
   // 右端の帯は、指でなぞるとページをスクロールできる場所（タッチ操作の端末でだけ表示）
   const ink = h('div', { class: 'nb-ink' }, pad.el, h('div', { class: 'nb-strip', 'aria-hidden': 'true' }));
   const scroll = h('div', { class: 'nb-scroll', dataset: { inkScroll: '1' } }, h('div', { class: 'nb-page' }, title, textHost, ink, extend));
-  view = { root: h('div', { class: 'nb' }, bar, diag, scroll), bar, diag, scroll, title, textHost, extend, key: null };
+  view = { root: h('div', { class: 'nb' }, bar, diag, scroll), bar, diag, diagText, scroll, title, textHost, extend, key: null };
 }
 
 function showDiagnostics() {
@@ -166,13 +175,12 @@ function showDiagnostics() {
   const update = () => {
     if (!view.diag.isConnected) return;
     const d = pad.diagnostics();
-    const l = d.last;
-    view.diag.textContent = [
-      `細かい動きの取得: ${yes(d.coalesced)}　先読み: ${yes(d.predicted)}　ペンの使用: ${d.penSeen ? 'あり' : 'まだなし'}`,
-      `キャンバス: ${d.canvas}　線の数: ${d.strokes}`,
-      l
-        ? `直前の線: 種類=${l.type}　長さ=${l.ms}ms　通知=${l.movesPerSec}回/秒　位置=${l.samplesPerSec}点/秒　記録=${l.points}点　遅れ=${l.lagMs}ms　筆圧=${l.pressure[0]}〜${l.pressure[1]}　先読み使用=${l.predicted ? 'あり' : 'なし'}`
-        : '直前の線: （まだ書いていません。1 本書くと表示されます）',
+    const line = (l, i) =>
+      `線${i + 1}: 種類=${l.type} 長さ=${l.ms}ms 通知=${l.movesPerSec}回/秒 位置=${l.samplesPerSec}点/秒（1通知あたり${l.perMove}点） 記録=${l.points}点 遅れ=${l.lagMs}ms 筆圧=${l.pressure[0]}〜${l.pressure[1]} 先読み=${l.predicted ? 'あり' : 'なし'}`;
+    view.diagText.textContent = [
+      `細かい動きの取得: ${yes(d.coalesced)} / 先読み: ${yes(d.predicted)} / ペンの使用: ${d.penSeen ? 'あり' : 'まだなし'}`,
+      `キャンバス: ${d.canvas} / ページ上の線の数: ${d.strokes}`,
+      d.recent.length ? d.recent.map(line).join('\n') : 'ここを開いたあとに書いた線: まだありません（ペンで 2〜3 本書くと、新しい順に表示されます）',
     ].join('\n');
   };
   update();
