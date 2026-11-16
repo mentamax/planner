@@ -94,7 +94,7 @@ const ToolButton = (label, on, onclick, extra = {}) =>
 
 function Toolbar() {
   const pen = tool.mode === 'pen';
-  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const touch = window.matchMedia('(any-pointer: coarse)').matches;
   const set = patch => {
     Object.assign(tool, patch);
     emit();
@@ -133,51 +133,91 @@ function Toolbar() {
     touch ? ToolButton('指で書く', tool.finger, () => set({ finger: !tool.finger }), { title: 'オフのとき、書けるのはペンだけ' }) : null,
     // ペンを使っている端末では、指 1 本には反応しない（手が触れても動かないようにするため）
     touch && pen.seen && !tool.finger ? h('span', { class: 'nb-hint' }, 'スクロールは 2 本指か、右端の帯で') : null,
+    ToolButton('診断', diagOn, () => {
+      diagOn = !diagOn;
+      emit();
+    }, { title: '手書きの入力状態を表示する（書き心地に問題があるときの原因調べ用）' }),
   );
+}
+
+// ノートの画面は 1 度だけ組み立てて使い回す。同期の完了などで画面全体が描き直されても、
+// キャンバスやスクロール位置に触れない（書いている最中の引っかかりや、書きかけの線の消失を防ぐ）。
+let view = null; // { root, bar, diag, scroll, title, textHost, extend, key }
+let diagOn = false;
+let diagTimer = 0;
+
+function build() {
+  const bar = h('div', { class: 'nb-bar' });
+  const diag = h('pre', { class: 'nb-diag', hidden: true });
+  const title = h('h2', { class: 'nb-title' });
+  const textHost = h('div', { class: 'nb-texthost' });
+  const extend = h('button', { class: 'btn small nb-extend', dataset: { nb: 'extend' }, onclick: () => pad.extend() }, icon('plus', 14), 'ページを下に伸ばす');
+  // 右端の帯は、指でなぞるとページをスクロールできる場所（タッチ操作の端末でだけ表示）
+  const ink = h('div', { class: 'nb-ink' }, pad.el, h('div', { class: 'nb-strip', 'aria-hidden': 'true' }));
+  const scroll = h('div', { class: 'nb-scroll', dataset: { inkScroll: '1' } }, h('div', { class: 'nb-page' }, title, textHost, ink, extend));
+  view = { root: h('div', { class: 'nb' }, bar, diag, scroll), bar, diag, scroll, title, textHost, extend, key: null };
+}
+
+function showDiagnostics() {
+  clearInterval(diagTimer);
+  view.diag.hidden = !diagOn;
+  if (!diagOn) return;
+  const yes = v => (v ? '対応' : '非対応');
+  const update = () => {
+    if (!view.diag.isConnected) return;
+    const d = pad.diagnostics();
+    const l = d.last;
+    view.diag.textContent = [
+      `細かい動きの取得: ${yes(d.coalesced)}　先読み: ${yes(d.predicted)}　ペンの使用: ${d.penSeen ? 'あり' : 'まだなし'}`,
+      `キャンバス: ${d.canvas}　線の数: ${d.strokes}`,
+      l
+        ? `直前の線: 種類=${l.type}　長さ=${l.ms}ms　通知=${l.movesPerSec}回/秒　位置=${l.samplesPerSec}点/秒　記録=${l.points}点　遅れ=${l.lagMs}ms　筆圧=${l.pressure[0]}〜${l.pressure[1]}　先読み使用=${l.predicted ? 'あり' : 'なし'}`
+        : '直前の線: （まだ書いていません。1 本書くと表示されます）',
+    ].join('\n');
+  };
+  update();
+  diagTimer = setInterval(update, 500);
 }
 
 export function NotebookView() {
   ensurePad();
+  if (!view) build();
   const { cursor, noteScope: scope } = state.ui;
   const key = noteKeyFor(scope, cursor);
   showPage(key);
 
-  const text = NoteBox(key, { placeholder: 'キーボードで入力…', cls: 'nb-text', label: `${pageTitle(scope, cursor)} のメモ（文字）` });
-  const fit = () => {
-    text.rows = Math.min(40, Math.max(3, text.value.split('\n').length + 1));
-  };
-  fit();
-  text.addEventListener('input', fit);
-
-  return h(
-    'div',
-    { class: 'nb' },
+  // ツールバーは小さいので毎回作り直す（選んでいる道具やページの切り替えを反映する）
+  view.bar.replaceChildren(
     h(
       'div',
-      { class: 'nb-bar' },
-      h(
-        'div',
-        { class: 'segs', role: 'tablist', 'aria-label': 'ノートのページ' },
-        SCOPES.map(([value, label]) =>
-          h('button', { class: `seg${scope === value ? ' on' : ''}`, role: 'tab', 'aria-selected': String(scope === value), onclick: () => setNoteScope(value) }, label),
-        ),
-      ),
-      Toolbar(),
-    ),
-    h(
-      'div',
-      { class: 'nb-scroll', dataset: { sk: `nb:${key}`, inkScroll: '1' } },
-      h(
-        'div',
-        { class: 'nb-page' },
-        h('h2', { class: 'nb-title' }, pageTitle(scope, cursor)),
-        text,
-        // 右端の帯は、指でなぞるとページをスクロールできる場所（タッチ操作の端末でだけ表示）
-        h('div', { class: 'nb-ink' }, pad.el, h('div', { class: 'nb-strip', 'aria-hidden': 'true' })),
-        h('button', { class: 'btn small nb-extend', disabled: !pad.canExtend, dataset: { nb: 'extend' }, onclick: () => pad.extend() }, icon('plus', 14), 'ページを下に伸ばす'),
+      { class: 'segs', role: 'tablist', 'aria-label': 'ノートのページ' },
+      SCOPES.map(([value, label]) =>
+        h('button', { class: `seg${scope === value ? ' on' : ''}`, role: 'tab', 'aria-selected': String(scope === value), onclick: () => setNoteScope(value) }, label),
       ),
     ),
+    Toolbar(),
   );
+  view.extend.disabled = !pad.canExtend;
+
+  const current = view.textHost.firstChild;
+  if (view.key !== key) {
+    // 別のページに切り替わった
+    view.key = key;
+    view.title.textContent = pageTitle(scope, cursor);
+    const text = NoteBox(key, { placeholder: 'キーボードで入力…', cls: 'nb-text', label: `${pageTitle(scope, cursor)} のメモ（文字）` });
+    const fit = () => {
+      text.rows = Math.min(40, Math.max(3, text.value.split('\n').length + 1));
+    };
+    fit();
+    text.addEventListener('input', fit);
+    view.textHost.replaceChildren(text);
+    view.scroll.scrollTop = 0;
+  } else if (current && document.activeElement !== current && current.value !== (state.notes[key] || '')) {
+    // 他の端末で書き換えられた文字を反映する（自分が入力している最中は触らない）
+    current.value = state.notes[key] || '';
+  }
+  showDiagnostics();
+  return view.root;
 }
 
 // ---- 他の画面から使う部品 ----

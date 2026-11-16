@@ -152,15 +152,26 @@ function WidgetBar() {
   );
 }
 
+// ノートは画面いっぱいに使う（右パネルは出さない）。外枠ごと使い回して、描き直しのたびにキャンバスを付け外ししない
+let noteShell = null;
+function NoteShell() {
+  if (!noteShell) {
+    const top = h('div', { class: 'shell-top' });
+    const body = h('div', { class: 'body view-note' });
+    noteShell = { el: h('div', { class: 'app' }, top, body), top, body };
+  }
+  noteShell.top.replaceChildren(...[Topbar(), Banner()].filter(Boolean));
+  const notebook = NotebookView();
+  if (noteShell.body.firstChild !== notebook) noteShell.body.replaceChildren(notebook);
+  return noteShell.el;
+}
+
 function App() {
   if (WIDGET) {
     return h('div', { class: 'app widget' }, WidgetBar(), Banner(), h('div', { class: 'body widget-body', dataset: { sk: 'widget' } }, TodayView()));
   }
   const { view } = state.ui;
-  if (view === 'note') {
-    // ノートは画面いっぱいに使う（右パネルは出さない）
-    return h('div', { class: 'app' }, Topbar(), Banner(), h('div', { class: 'body view-note' }, NotebookView()));
-  }
+  if (view === 'note') return NoteShell();
   flushInk(); // ノートを離れたら、書きかけの手書きをすぐ保存する
   const content =
     view === 'today'

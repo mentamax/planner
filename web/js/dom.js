@@ -124,7 +124,9 @@ export function mount(container, renderFn) {
       return;
     }
     const snap = capture(container);
-    container.replaceChildren(renderFn());
+    const next = renderFn();
+    // 前回と同じ要素が返ってきたら、付け外しをしない（中身は renderFn 側で直してある）
+    if (container.firstChild !== next || container.childNodes.length !== 1) container.replaceChildren(next);
     restore(container, snap);
   }
 

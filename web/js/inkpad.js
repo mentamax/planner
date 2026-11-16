@@ -17,6 +17,7 @@ const ERASER_RADIUS = 12;
 const PAGE_STEP = 650; // 「ページを伸ばす」で増える高さ
 const MIN_STEP2 = 9; // これより近い点は記録しない（座標は 10 倍の整数。ページ幅 1000 に対して 0.3 未満の動き）
 const HISTORY_MAX = 50;
+const PREDICT_MAX = 2; // 先読みを使う点の数
 const CORNER_COS = 0.35; // 向きの変化がこれより急（約 70 度以上の折れ）なら角として扱う
 const PEN_QUIET_MS = 1000; // ペンを離してからこの時間は、触れた手を無視する
 const PAN_START_PX = 10; // これ以上動いたらスクロール開始
@@ -124,19 +125,41 @@ export function createInkPad({ onChange, onState, onPen }) {
     liveBox = null;
   }
 
-  /** 書いている線の先端（最後の区間。次の点が来ると形が変わるので live 側に描く） */
+  /**
+   * 書いている線の先端を live 側に描く。最後の区間（次の点が来ると形が変わる）と、
+   * ブラウザが予測した少し先の位置（対応している場合）。予測分は記録せず、次の通知で描き直す。
+   */
   function drawTip() {
     clearLive();
     const s = drawing.stroke;
-    const n = s.p.length / 3;
+    const p = s.p;
+    const n = p.length / 3;
     prepare(lctx, s);
     if (n === 1) dot(lctx, s);
     else segment(lctx, s, n - 2);
-    const i = Math.max(n - 2, 0);
+    const first = Math.max(n - 2, 0);
+    let x0 = Math.min(X(p, first), X(p, n - 1));
+    let y0 = Math.min(Y(p, first), Y(p, n - 1));
+    let x1 = Math.max(X(p, first), X(p, n - 1));
+    let y1 = Math.max(Y(p, first), Y(p, n - 1));
+    const ahead = drawing.ahead;
+    if (ahead?.length) {
+      lctx.lineWidth = W(s, n - 1);
+      lctx.beginPath();
+      lctx.moveTo(X(p, n - 1), Y(p, n - 1));
+      for (let i = 0; i < ahead.length; i += 3) {
+        const ax = (ahead[i] / 10) * unit;
+        const ay = (ahead[i + 1] / 10) * unit;
+        lctx.lineTo(ax, ay);
+        x0 = Math.min(x0, ax);
+        y0 = Math.min(y0, ay);
+        x1 = Math.max(x1, ax);
+        y1 = Math.max(y1, ay);
+      }
+      lctx.stroke();
+    }
     const pad = W(s, n - 1) + 4;
-    const x0 = Math.min(X(s.p, i), X(s.p, n - 1)) - pad;
-    const y0 = Math.min(Y(s.p, i), Y(s.p, n - 1)) - pad;
-    liveBox = [x0, y0, Math.abs(X(s.p, i) - X(s.p, n - 1)) + pad * 2, Math.abs(Y(s.p, i) - Y(s.p, n - 1)) + pad * 2];
+    liveBox = [x0 - pad, y0 - pad, x1 - x0 + pad * 2, y1 - y0 + pad * 2];
   }
 
   function redraw() {
@@ -195,7 +218,13 @@ export function createInkPad({ onChange, onState, onPen }) {
   function point(e) {
     const r = el.getBoundingClientRect();
     const k = PAGE_W / r.width;
-    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
+    // ペンは筆圧をそのまま使う。筆圧 0 で届く通知（離す瞬間など）は、直前の筆圧を引き継ぐ
+    // （0.5 として扱うと、軽く書いた線の終わりだけ太くなってしまう）
+    let pressure = 0.5;
+    if (e.pointerType === 'pen') {
+      const prev = drawing ? drawing.stroke.p[drawing.stroke.p.length - 1] / 100 : 0.3;
+      pressure = e.pressure > 0 ? e.pressure : prev;
+    }
     return [
       Math.round(clamp((e.clientX - r.left) * k, 0, PAGE_W) * 10),
       Math.round(clamp((e.clientY - r.top) * k, 0, doc.h) * 10),
@@ -227,8 +256,41 @@ export function createInkPad({ onChange, onState, onPen }) {
   }
 
   function startStroke(e) {
-    drawing = { id: e.pointerId, stroke: { c: tool.color, w: WIDTHS[tool.width] || WIDTHS[0], p: point(e) } };
+    drawing = { id: e.pointerId, stroke: { c: tool.color, w: WIDTHS[tool.width] || WIDTHS[0], p: point(e) }, ahead: [] };
+    live1 = { type: e.pointerType, t0: e.timeStamp, t1: e.timeStamp, moves: 0, samples: 0, lag: 0, pMin: 1, pMax: 0, predicted: false };
     drawTip();
+  }
+
+  // ---- 診断用の計測（ノートの「診断」表示で使う。書き心地に問題があるときの原因調べ用） ----
+
+  let live1 = null; // いま書いている線の計測
+  let lastStroke = null; // 直前に書いた線の計測結果
+
+  function measure(e, sampleCount) {
+    if (!live1) return;
+    live1.moves++;
+    live1.samples += sampleCount;
+    live1.t1 = e.timeStamp;
+    live1.lag += Math.max(0, performance.now() - e.timeStamp);
+    live1.pMin = Math.min(live1.pMin, e.pressure);
+    live1.pMax = Math.max(live1.pMax, e.pressure);
+    if (drawing?.ahead.length) live1.predicted = true;
+  }
+
+  function closeMeasure(points) {
+    if (!live1) return;
+    const seconds = Math.max(live1.t1 - live1.t0, 1) / 1000;
+    lastStroke = {
+      type: live1.type,
+      ms: Math.round(seconds * 1000),
+      movesPerSec: Math.round(live1.moves / seconds),
+      samplesPerSec: Math.round(live1.samples / seconds),
+      points,
+      lagMs: live1.moves ? Math.round(live1.lag / live1.moves) : 0,
+      pressure: [Math.round(live1.pMin * 100) / 100, Math.round(live1.pMax * 100) / 100],
+      predicted: live1.predicted,
+    };
+    live1 = null;
   }
 
   /** 書いている線を確定する */
@@ -242,6 +304,7 @@ export function createInkPad({ onChange, onState, onPen }) {
     remember(doc.strokes);
     doc.strokes = [...doc.strokes, s];
     drawing = null;
+    closeMeasure(n);
     changed();
   }
 
@@ -289,15 +352,17 @@ export function createInkPad({ onChange, onState, onPen }) {
   //        ・ペンを使ったことがない端末 … 1 本指でスクロール
 
   const touches = new Map(); // いま触れている指（pointerId → 触れた時刻）
-  let lockTimer = 0;
   const penBusy = () => !!(drawing || erasing) || Date.now() - lastPen < PEN_QUIET_MS;
 
-  /** ペンで書いている間とその直後は、ページ全体のスクロールも止める（手が余白に触れても動かないように） */
-  function lockScroll(on) {
-    clearTimeout(lockTimer);
-    if (on) document.documentElement.classList.add('ink-writing');
-    else lockTimer = setTimeout(() => document.documentElement.classList.remove('ink-writing'), PEN_QUIET_MS);
-  }
+  // ペンで書いている間とその直後は、手が触れてもページがスクロール・拡大しないようにする。
+  // （書き始めのたびに画面の作りを切り替えると引っかかりの原因になるので、タッチの動きだけを無効にする）
+  document.addEventListener(
+    'touchmove',
+    e => {
+      if (el.isConnected && penBusy() && e.cancelable) e.preventDefault();
+    },
+    { passive: false },
+  );
 
   function sawPen() {
     lastPen = Date.now();
@@ -328,10 +393,7 @@ export function createInkPad({ onChange, onState, onPen }) {
     // 前の線の「離した」を取りこぼしていても、次の線は必ず書き始められるようにする
     if (drawing) commitStroke();
     if (erasing) endErase();
-    if (e.pointerType === 'pen') {
-      sawPen();
-      lockScroll(true);
-    }
+    if (e.pointerType === 'pen') sawPen();
     pan = null;
     e.preventDefault();
     capture(e);
@@ -346,9 +408,14 @@ export function createInkPad({ onChange, onState, onPen }) {
   el.addEventListener('pointermove', e => {
     if (drawing?.id === e.pointerId) {
       if (e.pointerType === 'pen') lastPen = Date.now();
+      const list = samples(e);
       let added = false;
-      for (const ev of samples(e)) added = addPoint(ev) || added;
-      if (added) drawTip();
+      for (const ev of list) added = addPoint(ev) || added;
+      // 先読みは 2 点まで使う（多く使うと、向きを変えたときに行き過ぎて見える）
+      const predicted = e.getPredictedEvents?.() || [];
+      drawing.ahead = predicted.slice(0, PREDICT_MAX).flatMap(ev => point(ev));
+      if (added || drawing.ahead.length) drawTip();
+      measure(e, list.length);
     } else if (erasing?.id === e.pointerId) {
       for (const ev of samples(e)) eraseAt(ev);
     } else if (pan?.id === e.pointerId) {
@@ -363,17 +430,10 @@ export function createInkPad({ onChange, onState, onPen }) {
       if (pan && (pan.id === e.pointerId || touches.size < (pen.seen ? 2 : 1))) endPan();
     }
     if (drawing?.id === e.pointerId) {
-      if (e.pointerType === 'pen') {
-        lastPen = Date.now();
-        lockScroll(false);
-      }
-      if (e.type === 'pointerup') addPoint(e); // 離した位置まで線を届かせる
+      if (e.pointerType === 'pen') lastPen = Date.now();
       commitStroke();
     } else if (erasing?.id === e.pointerId) {
-      if (e.pointerType === 'pen') {
-        lastPen = Date.now();
-        lockScroll(false);
-      }
+      if (e.pointerType === 'pen') lastPen = Date.now();
       endErase();
     }
   }
@@ -447,6 +507,18 @@ export function createInkPad({ onChange, onState, onPen }) {
     },
     get canExtend() {
       return !!doc && doc.h < PAGE_H_MAX;
+    },
+    /** 診断表示用の情報 */
+    diagnostics() {
+      const proto = typeof PointerEvent === 'undefined' ? {} : PointerEvent.prototype;
+      return {
+        coalesced: 'getCoalescedEvents' in proto,
+        predicted: 'getPredictedEvents' in proto,
+        canvas: `${el.clientWidth}×${el.clientHeight}（内部 ${base.width}×${base.height}・倍率 ${window.devicePixelRatio}）`,
+        strokes: doc?.strokes.length ?? 0,
+        penSeen: pen.seen,
+        last: lastStroke,
+      };
     },
     undo() {
       if (!doc || !history.length) return;
