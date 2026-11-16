@@ -1,0 +1,17 @@
+{
+  "name": "Planner 今日の一覧",
+  "short_name": "今日",
+  "description": "今日の予定・タスク・メモ",
+  "lang": "ja",
+  "id": "./today.html",
+  "start_url": "./today.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1f2a44",
+  "icons": [
+    { "src": "icons/today-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/today-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/today-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
