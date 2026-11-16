@@ -208,6 +208,9 @@ async function mappingTests() {
   eq('ログイン: 関係ない # は無視', [G.parseLoginResult('', 'abc'), G.parseLoginResult('#section', 'abc')], [null, null]);
   eq('ログイン: 合言葉が違うものは受け付けない', [!!G.parseLoginResult(`#state=evil&access_token=tok&scope=${scope}`, 'abc').error, !!G.parseLoginResult(`#state=abc&access_token=tok&scope=${scope}`, null).error], [true, true]);
   eq('ログイン: 拒否された', G.parseLoginResult('#error=access_denied&state=abc', 'abc').error, 'アクセスが許可されませんでした');
+  const { safeReturnPath } = await import('./sync.js');
+  eq('ログイン後の戻り先: 別ページから始めたときだけ戻る', [safeReturnPath('/planner/today.html', '/planner/'), safeReturnPath('/planner/', '/planner/'), safeReturnPath('/planner/?x=1', '/planner/')], ['/planner/today.html', null, null]);
+  eq('ログイン後の戻り先: 外部サイトや不正な値は無視', [safeReturnPath('//evil.example/x', '/'), safeReturnPath('https://evil.example', '/'), safeReturnPath('/\\evil.example', '/'), safeReturnPath(null, '/')], [null, null, null, null]);
   eq('ログイン: 一部の許可が外されている', !!G.parseLoginResult(`#state=abc&access_token=tok&scope=${encodeURIComponent(G.SCOPES.slice(0, 2).join(' '))}`, 'abc').error, true);
 }
 

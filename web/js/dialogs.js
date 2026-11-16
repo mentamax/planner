@@ -353,6 +353,12 @@ function SettingsBody(close) {
           ),
         ),
       ),
+      Field('今日の一覧', h('a', { class: 'btn', href: 'today.html', target: '_blank', rel: 'noopener' }, icon('calendar', 16), '小さな画面で開く')),
+      h(
+        'p',
+        { class: 'form-hint' },
+        '今日の予定・タスク・メモだけをまとめた画面です。Mac では Safari の「ファイル → Dock に追加」で小さな窓のアプリにでき、スマホでは開いた状態で「ホーム画面に追加」すると専用のアイコンになります。',
+      ),
     ),
 
     h(

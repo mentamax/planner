@@ -2,12 +2,13 @@
 import { h, mount } from './dom.js';
 import { state, subscribe, setView, setCursor, pendingCount } from './store.js';
 import { initSync, connect, syncNow, ensureWindow } from './sync.js';
-import { today, addDays, addMonths, startOfWeek, fmtMonth, fmtWeekRange, toHM } from './dates.js';
+import { today, addDays, addMonths, startOfWeek, fmtMonth, fmtWeekRange, fmtDay, toHM } from './dates.js';
 import { icon, isPhone } from './ui.js';
 import { MonthView } from './views/month.js';
 import { WeekView } from './views/week.js';
 import { BoardView } from './views/board.js';
 import { SidePanel } from './views/side.js';
+import { TodayView } from './views/today.js';
 import { openItemDialog, openSettings } from './dialogs.js';
 
 const VIEWS = [
@@ -122,7 +123,29 @@ function Banner() {
   return null;
 }
 
+// today.html で開いたときは、小さな窓に置いておく「今日の一覧」だけを表示する
+const WIDGET = document.documentElement.dataset.mode === 'today';
+
+function WidgetBar() {
+  const t = today();
+  return h(
+    'header',
+    { class: 'topbar widget-bar' },
+    h('h1', { class: 'range' }, fmtDay(t)),
+    h(
+      'div',
+      { class: 'actions' },
+      SyncChip(),
+      h('button', { class: 'btn primary icon-btn', 'aria-label': '追加', title: '追加', onclick: () => openItemDialog({ defaults: { date: t } }) }, icon('plus', 16)),
+      h('a', { class: 'btn icon-btn ghost', href: './', 'aria-label': 'Planner 全体を開く', title: 'Planner 全体を開く' }, icon('calendar')),
+    ),
+  );
+}
+
 function App() {
+  if (WIDGET) {
+    return h('div', { class: 'app widget' }, WidgetBar(), Banner(), h('div', { class: 'body widget-body', dataset: { sk: 'widget' } }, TodayView()));
+  }
   const { view } = state.ui;
   const content = view === 'month' ? MonthView() : view === 'week' ? WeekView() : BoardView();
   return h(

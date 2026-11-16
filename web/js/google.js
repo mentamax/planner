@@ -47,7 +47,7 @@ export function clearToken() {
 }
 
 /** Google Cloud の「承認済みのリダイレクト URI」に登録するアドレス（＝このアプリを開いているアドレス） */
-export const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, '');
+export const redirectUri = () => new URL('./', location.href).href;
 
 /** Google のログイン画面へ移動する */
 export function beginLogin(clientId) {

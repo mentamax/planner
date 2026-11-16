@@ -16,6 +16,7 @@ const ICONS = {
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   link: '<path d="M14 5h5v5M19 5l-8 8M11 7H6v11h11v-5"/>',
   cloud: '<path d="M7 18a4 4 0 0 1-.6-7.96A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z"/>',
+  calendar: '<path d="M5 6h14v14H5zM5 10h14M9 4v4M15 4v4"/>',
 };
 
 /** スマホ幅か（style.css の 640px と合わせる） */

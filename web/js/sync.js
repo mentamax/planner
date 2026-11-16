@@ -55,6 +55,17 @@ export async function saveSecret(clientId, clientSecret) {
   emit();
 }
 
+const RETURN_KEY = `${globalThis.PLANNER_NS || 'planner'}.returnTo`;
+
+/**
+ * ログイン後に戻るページ。控えておいたパスが、このサイト内の別ページを指しているときだけ返す
+ * （外部サイトへ飛ばされないよう、「/」始まりのパス以外は受け付けない）。
+ */
+export function safeReturnPath(saved, currentPath) {
+  if (typeof saved !== 'string' || !/^\/(?![/\\])/.test(saved) || saved.includes('\\')) return null;
+  return saved.split(/[?#]/)[0] === currentPath ? null : saved;
+}
+
 /**
  * Google と接続する。どちらの方式も、ページごと Google のログイン画面へ移動して戻ってくる
  * （戻ってきたあとの処理は initSync）。
@@ -67,6 +78,8 @@ export function connect() {
   }
   setAuth('connecting');
   persist(); // ページを離れる前に、書きかけの内容を確実に保存する
+  // ログインはアプリのトップに戻ってくるので、いま開いているページ（今日の一覧など）を控えておく
+  localStorage.setItem(RETURN_KEY, location.pathname + location.search);
   if (state.backend?.hasSecret) location.assign(backend.START_URL); // サーバー方式（接続を保てる）
   else g.beginLogin(clientId); // ブラウザだけの方式（約 1 時間）
 }
@@ -362,7 +375,16 @@ export async function initSync() {
   const login = g.finishLogin(); // ブラウザだけの方式（URL の # 以降にトークン）
   const params = new URLSearchParams(location.search); // サーバー方式（?auth=ok / ?auth_error=…）
   const authError = params.get('auth_error');
+  const loggedIn = login?.ok || params.has('auth');
   if (authError || params.has('auth')) history.replaceState(null, '', location.pathname);
+
+  // 「今日の一覧」など別のページから接続を始めていたら、そのページへ戻る
+  const back = safeReturnPath(localStorage.getItem(RETURN_KEY), location.pathname);
+  localStorage.removeItem(RETURN_KEY);
+  if (loggedIn && back) {
+    location.replace(back);
+    return;
+  }
 
   state.backend = await backend.fetchStatus();
   // サーバー方式では、サーバーに保存したクライアント ID が正
