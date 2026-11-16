@@ -15,9 +15,9 @@ export function SidePanel() {
     'aside',
     { class: 'side', dataset: { sk: 'side' } },
     view === 'month' ? DaySection(cursor) : null,
-    WeekSection(days, ws, view !== 'month'),
-    view === 'month' ? MonthSection(cursor) : null,
-    OverdueSection(),
+    WeekSection(days, ws, view === 'week' || view === 'board'),
+    view === 'month' || view === 'today' ? MonthSection(cursor) : null,
+    view === 'today' ? null : OverdueSection(), // 「今日」のページでは本体側に出している
     UndatedSection(),
   );
 }

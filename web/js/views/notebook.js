@@ -5,7 +5,7 @@ import { state, emit, setCursor, setView, setNoteScope, dayNoteKey, weekNoteKey,
 import { fmtDay, fmtMonth, fmtMD, weekDates, isoWeek, mondayOf, today } from '../dates.js';
 import { inkBounds, strokePath } from '../model.js';
 import { loadInk, cachedInk, saveInk, blankInk, onRemoteInk, PAGE_W } from '../ink.js';
-import { createInkPad, tool, COLORS, COLOR_NAMES, WIDTHS } from '../inkpad.js';
+import { createInkPad, tool, pen, COLORS, COLOR_NAMES, WIDTHS } from '../inkpad.js';
 import { NoteBox, icon } from '../ui.js';
 
 const SCOPES = [
@@ -44,7 +44,9 @@ function ensurePad() {
       clearTimeout(saveTimer);
       saveTimer = setTimeout(save, 600);
     },
-    onState: () => emit(), // 「元に戻す」などのボタンの状態を更新する
+    // 書くたびに画面全体を作り直すと書き心地が悪くなるので、ボタンの有効・無効だけをその場で直す
+    onState: syncButtons,
+    onPen: () => emit(), // 初めてペンを検知したら、スクロール方法の案内を出す
   });
   // 開いているページの手書きが他の端末で書き換えられたら、表示を差し替える（自分が書いている最中は除く）
   onRemoteInk(doc => {
@@ -53,6 +55,16 @@ function ensurePad() {
   document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && save());
   window.addEventListener('pagehide', save);
   return pad;
+}
+
+function syncButtons() {
+  const set = (name, disabled) => {
+    const button = document.querySelector(`[data-nb="${name}"]`);
+    if (button) button.disabled = disabled;
+  };
+  set('undo', !pad.canUndo);
+  set('clear', pad.isEmpty);
+  set('extend', !pad.canExtend);
 }
 
 function showPage(key) {
@@ -116,11 +128,11 @@ function Toolbar() {
     ),
     h('span', { class: 'nb-sep' }),
     ToolButton('消しゴム', tool.mode === 'eraser', () => set({ mode: tool.mode === 'eraser' ? 'pen' : 'eraser' }), { title: 'なぞった線を消す' }),
-    h('button', { class: 'nb-tool', disabled: !pad.canUndo, onclick: () => pad.undo() }, '元に戻す'),
-    h('button', { class: 'nb-tool', disabled: pad.isEmpty, title: 'このページの手書きをすべて消す（「元に戻す」で戻せます）', onclick: () => pad.clear() }, '全部消す'),
-    touch
-      ? ToolButton('指で書く', tool.finger, () => set({ finger: !tool.finger }), { title: 'オフのとき、指はスクロール・ペンは書く' })
-      : null,
+    h('button', { class: 'nb-tool', disabled: !pad.canUndo, dataset: { nb: 'undo' }, onclick: () => pad.undo() }, '元に戻す'),
+    h('button', { class: 'nb-tool', disabled: pad.isEmpty, dataset: { nb: 'clear' }, title: 'このページの手書きをすべて消す（「元に戻す」で戻せます）', onclick: () => pad.clear() }, '全部消す'),
+    touch ? ToolButton('指で書く', tool.finger, () => set({ finger: !tool.finger }), { title: 'オフのとき、書けるのはペンだけ' }) : null,
+    // ペンを使っている端末では、指 1 本には反応しない（手が触れても動かないようにするため）
+    touch && pen.seen && !tool.finger ? h('span', { class: 'nb-hint' }, 'スクロールは 2 本指か、右端の帯で') : null,
   );
 }
 
@@ -160,8 +172,9 @@ export function NotebookView() {
         { class: 'nb-page' },
         h('h2', { class: 'nb-title' }, pageTitle(scope, cursor)),
         text,
-        h('div', { class: 'nb-ink' }, pad.el),
-        h('button', { class: 'btn small nb-extend', disabled: !pad.canExtend, onclick: () => pad.extend() }, icon('plus', 14), 'ページを下に伸ばす'),
+        // 右端の帯は、指でなぞるとページをスクロールできる場所（タッチ操作の端末でだけ表示）
+        h('div', { class: 'nb-ink' }, pad.el, h('div', { class: 'nb-strip', 'aria-hidden': 'true' })),
+        h('button', { class: 'btn small nb-extend', disabled: !pad.canExtend, dataset: { nb: 'extend' }, onclick: () => pad.extend() }, icon('plus', 14), 'ページを下に伸ばす'),
       ),
     ),
   );

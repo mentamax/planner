@@ -27,28 +27,36 @@ function TimedEventRow(item, date, nowMin) {
   return row;
 }
 
-export function TodayView() {
+/** date を省くと今日。Planner 本体の「今日」タブでは、前後の日にも移動できる */
+export function TodayView(date) {
   const t = today();
-  const tomorrow = addDays(t, 1);
+  const d = date || t;
+  const isToday = d === t;
+  const next = addDays(d, 1);
   const now = new Date();
   const nowMin = now.getHours() * 60 + now.getMinutes();
 
-  const events = eventsOn(t);
-  const tasks = tasksOn(t);
+  const events = eventsOn(d);
+  const tasks = tasksOn(d);
   const done = tasks.filter(i => i.done).length;
-  const overdue = overdueTasks();
-  const next = [...eventsOn(tomorrow).map(i => EventRow(i, tomorrow)), ...tasksOn(tomorrow).map(i => TaskRow(i, { date: tomorrow }))];
+  const overdue = isToday ? overdueTasks() : [];
+  const nextItems = [...eventsOn(next).map(i => EventRow(i, next)), ...tasksOn(next).map(i => TaskRow(i, { date: next }))];
+  const memoKey = dayNoteKey(d);
 
   return h(
     'div',
     { class: 'today' },
-    Section('予定', Meta(events.length ? `${events.length} 件` : ''), events.length ? events.map(i => TimedEventRow(i, t, nowMin)) : Empty('今日の予定はありません')),
+    Section(
+      '予定',
+      Meta(events.length ? `${events.length} 件` : ''),
+      events.length ? events.map(i => (isToday ? TimedEventRow(i, d, nowMin) : EventRow(i, d))) : Empty(isToday ? '今日の予定はありません' : '予定はありません'),
+    ),
     Section(
       'タスク',
       Meta(tasks.length ? `${done} / ${tasks.length} 完了` : '', tasks.length && done === tasks.length ? 'all' : ''),
       tasks.length ? ProgressBar({ done, total: tasks.length }) : null,
-      tasks.map(i => TaskRow(i, { date: t })),
-      QuickAdd({ date: t, fk: `qa:today:${t}`, placeholder: '＋ 今日のタスクを追加' }),
+      tasks.map(i => TaskRow(i, { date: d })),
+      QuickAdd({ date: d, fk: `qa:today:${d}`, placeholder: isToday ? '＋ 今日のタスクを追加' : '＋ タスクを追加' }),
     ),
     overdue.length
       ? Section(
@@ -60,10 +68,10 @@ export function TodayView() {
       : null,
     Section(
       'メモ',
-      NotebookButton(dayNoteKey(t)),
-      NoteBox(dayNoteKey(t), { placeholder: '今日のメモ…', cls: 'today-note', label: `${fmtDay(t)} のメモ` }),
-      InkPreview(dayNoteKey(t)),
+      NotebookButton(memoKey),
+      NoteBox(memoKey, { placeholder: isToday ? '今日のメモ…' : 'この日のメモ…', cls: 'today-note', label: `${fmtDay(d)} のメモ` }),
+      InkPreview(memoKey),
     ),
-    Section(`明日　${fmtDay(tomorrow)}`, Meta(next.length ? `${next.length} 件` : ''), next.length ? next : Empty('予定・タスクはありません')),
+    Section(`${isToday ? '明日' : '翌日'}　${fmtDay(next)}`, Meta(nextItems.length ? `${nextItems.length} 件` : ''), nextItems.length ? nextItems : Empty('予定・タスクはありません')),
   );
 }

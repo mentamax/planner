@@ -13,6 +13,7 @@ import { NotebookView, flushInk } from './views/notebook.js';
 import { openItemDialog, openSettings } from './dialogs.js';
 
 const VIEWS = [
+  ['today', '今日'],
   ['month', '月'],
   ['week', '週'],
   ['board', 'タスク'],
@@ -27,13 +28,13 @@ function go(date) {
 /** 前へ・次へ。表示中の単位（月 / 週 / ノートなら開いているページの単位）で動かす */
 function step(dir) {
   const { view, cursor, noteScope } = state.ui;
-  const unit = view === 'note' ? noteScope : view === 'month' ? 'month' : 'week';
+  const unit = view === 'note' ? noteScope : view === 'today' ? 'day' : view === 'month' ? 'month' : 'week';
   go(unit === 'month' ? addMonths(cursor, dir) : addDays(cursor, unit === 'day' ? dir : dir * 7));
 }
 
 function rangeTitle() {
   const { view, cursor, noteScope } = state.ui;
-  if (view === 'note' && noteScope === 'day') return `${cursor.slice(0, 4)}年${fmtDay(cursor)}`;
+  if (view === 'today' || (view === 'note' && noteScope === 'day')) return `${cursor.slice(0, 4)}年${fmtDay(cursor)}`;
   const monthly = view === 'month' || (view === 'note' && noteScope === 'month');
   return monthly ? fmtMonth(cursor) : fmtWeekRange(startOfWeek(cursor, state.settings.weekStart));
 }
@@ -161,7 +162,14 @@ function App() {
     return h('div', { class: 'app' }, Topbar(), Banner(), h('div', { class: 'body view-note' }, NotebookView()));
   }
   flushInk(); // ノートを離れたら、書きかけの手書きをすぐ保存する
-  const content = view === 'month' ? MonthView() : view === 'week' ? WeekView() : BoardView();
+  const content =
+    view === 'today'
+      ? h('div', { class: 'today-wrap' }, TodayView(state.ui.cursor))
+      : view === 'month'
+        ? MonthView()
+        : view === 'week'
+          ? WeekView()
+          : BoardView();
   return h(
     'div',
     { class: 'app' },
@@ -174,7 +182,8 @@ function App() {
         // スマホのタスク表示は 1 週間を縦に並べるので、今日の位置から始める
         dataset: { sk: `body:${view}`, ...(view === 'board' && isPhone() ? { skInitTop: '.board-col.today', skInitOffset: '8' } : {}) },
       },
-      h('main', { class: 'main' }, content),
+      // 「今日」は本体が縦に長くなるので、描き直してもスクロール位置を保つ
+      h('main', { class: 'main', ...(view === 'today' ? { dataset: { sk: 'today-main' } } : {}) }, content),
       SidePanel(),
     ),
   );

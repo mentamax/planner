@@ -1,6 +1,6 @@
 // 手書き用のキャンバス。Apple Pencil・指・マウスの動きを線として記録し、描画する。
 // 標準の Pointer Events だけを使う。キャンバス上ではブラウザのスクロールを止め（CSS の touch-action: none）、
-// 「ペン = 書く」「指 = スクロール（設定で書くにもできる）」をここで振り分ける。
+// ペン・指・マウスの役割をここで振り分ける（下の「ペン・指・マウスの振り分け」を参照）。
 import { PAGE_W, PAGE_H_MAX } from './ink.js';
 import { eraseStrokes } from './model.js';
 
@@ -17,8 +17,14 @@ const ERASER_RADIUS = 12;
 const PAGE_STEP = 650; // 「ページを伸ばす」で増える高さ
 const MIN_STEP2 = 64; // これより近い点は記録しない（座標は 10 倍の整数なので 0.8 の 2 乗 × 100）
 const HISTORY_MAX = 50;
+const PEN_QUIET_MS = 1000; // ペンを離してからこの時間は、触れた手を無視する
+const PAN_START_PX = 10; // これ以上動いたらスクロール開始
 
-export function createInkPad({ onChange, onState }) {
+const PEN_KEY = `${globalThis.PLANNER_NS || 'planner'}.pen`;
+/** この端末でペン（Apple Pencil など）を使ったことがあるか。あれば指 1 本では反応させない */
+export const pen = { seen: localStorage.getItem(PEN_KEY) === '1' };
+
+export function createInkPad({ onChange, onState, onPen }) {
   const canvas = document.createElement('canvas');
   canvas.className = 'ink-canvas';
   canvas.setAttribute('role', 'img');
@@ -177,16 +183,53 @@ export function createInkPad({ onChange, onState }) {
     }
   }
 
+  // ---- ペン・指・マウスの振り分け ----
+  //   ペン / マウス : 書く（または消す）
+  //   指 : 「指で書く」がオンなら書く。オフのときは、
+  //        ・ペンを使ったことがある端末 … 1 本指では何もしない（手のひらや指が触れても動かない）。スクロールは 2 本指
+  //        ・ペンを使ったことがない端末 … 1 本指でスクロール
+
+  const touches = new Map(); // いま触れている指（pointerId → 触れた時刻）
+  let lockTimer = 0;
+  const penBusy = () => !!(drawing || erasing) || Date.now() - lastPen < PEN_QUIET_MS;
+
+  /** ペンで書いている間とその直後は、ページ全体のスクロールも止める（手が余白に触れても動かないように） */
+  function lockScroll(on) {
+    clearTimeout(lockTimer);
+    if (on) document.documentElement.classList.add('ink-writing');
+    else lockTimer = setTimeout(() => document.documentElement.classList.remove('ink-writing'), PEN_QUIET_MS);
+  }
+
+  function sawPen() {
+    lastPen = Date.now();
+    if (pen.seen) return;
+    pen.seen = true;
+    try {
+      localStorage.setItem(PEN_KEY, '1');
+    } catch {
+      /* 覚えておけなくても、このページを開いている間は有効 */
+    }
+    onPen?.();
+  }
+
   canvas.addEventListener('pointerdown', e => {
-    if (!doc || drawing || erasing) return;
+    if (!doc) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     cancelAnimationFrame(momentum);
-    if (e.pointerType === 'pen') lastPen = Date.now();
 
     if (e.pointerType === 'touch' && !tool.finger) {
-      // 指はスクロール。ペンで書いている最中や直後に触れた手のひらは無視する
-      if (Date.now() - lastPen > 1200) startPan(e);
+      const now = Date.now();
+      for (const [id, since] of touches) if (now - since > 60_000) touches.delete(id); // 離れたことを取りこぼした分を掃除
+      touches.set(e.pointerId, now);
+      capture(e);
+      if (penBusy()) return; // 書いている最中・直後に触れた手は無視する
+      if (touches.size === (pen.seen ? 2 : 1)) startPan(e);
       return;
+    }
+    if (drawing || erasing) return;
+    if (e.pointerType === 'pen') {
+      sawPen();
+      lockScroll(true);
     }
     pan = null;
     e.preventDefault();
@@ -214,35 +257,57 @@ export function createInkPad({ onChange, onState }) {
   });
 
   function finish(e) {
+    if (e.pointerType === 'touch') {
+      touches.delete(e.pointerId);
+      // スクロール中の指が離れたか、2 本指のうち 1 本が離れたら終わり
+      if (pan && (pan.id === e.pointerId || touches.size < (pen.seen ? 2 : 1))) endPan();
+    }
     if (drawing?.id === e.pointerId) {
-      if (e.pointerType === 'pen') lastPen = Date.now();
+      if (e.pointerType === 'pen') {
+        lastPen = Date.now();
+        lockScroll(false);
+      }
       remember(doc.strokes);
       doc.strokes = [...doc.strokes, drawing.stroke];
       drawing = null;
       changed();
     } else if (erasing?.id === e.pointerId) {
+      if (e.pointerType === 'pen') {
+        lastPen = Date.now();
+        lockScroll(false);
+      }
       const { before } = erasing;
       erasing = null;
       if (before !== doc.strokes) {
         remember(before);
         changed();
       }
-    } else if (pan?.id === e.pointerId) {
-      endPan();
     }
   }
   canvas.addEventListener('pointerup', finish);
   canvas.addEventListener('pointercancel', finish);
+  window.addEventListener('blur', () => touches.clear());
 
   // ---- 指でのスクロール（キャンバス上ではブラウザのスクロールが効かないので、ここで動かす） ----
 
   function startPan(e) {
     const scroller = canvas.closest('[data-ink-scroll]');
     if (!scroller) return;
-    pan = { id: e.pointerId, scroller, y: e.clientY, t: e.timeStamp, v: 0 };
-    capture(e);
+    pan = { id: e.pointerId, scroller, y: e.clientY, y0: e.clientY, t: e.timeStamp, v: 0, moving: false };
   }
   function movePan(e) {
+    if (penBusy()) {
+      pan = null; // 書き始めたら、スクロールはやめる
+      return;
+    }
+    // 触れただけ・わずかにずれただけでは動かさない
+    if (!pan.moving && Math.abs(e.clientY - pan.y0) < PAN_START_PX) return;
+    if (!pan.moving) {
+      pan.moving = true;
+      pan.y = e.clientY;
+      pan.t = e.timeStamp;
+      return;
+    }
     const dy = e.clientY - pan.y;
     const dt = Math.max(1, e.timeStamp - pan.t);
     pan.scroller.scrollTop -= dy;
@@ -251,9 +316,10 @@ export function createInkPad({ onChange, onState }) {
     pan.t = e.timeStamp;
   }
   function endPan() {
-    const { scroller } = pan;
+    const { scroller, moving } = pan;
     let v = pan.v * 16; // 1 フレームあたりの移動量
     pan = null;
+    if (!moving) return;
     const step = () => {
       if (Math.abs(v) < 0.4) return;
       scroller.scrollTop -= v;

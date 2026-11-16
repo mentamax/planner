@@ -50,7 +50,7 @@ export const state = {
   calendars: savedGoogle.calendars || [],
   taskLists: savedGoogle.taskLists || [],
   ui: {
-    view: ['month', 'week', 'board', 'note'].includes(savedUi.view) ? savedUi.view : 'week',
+    view: 'today', // 開いたときは、いつも「今日」のページから始める
     cursor: today(),
     noteScope: ['day', 'week', 'month'].includes(savedUi.noteScope) ? savedUi.noteScope : 'day', // ノート画面で開くページ
   },
