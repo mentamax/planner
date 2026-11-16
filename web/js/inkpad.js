@@ -15,8 +15,9 @@ const RULE_GAP = 52; // 罫線の間隔
 const RULE_COLOR = '#e8e2d3';
 const ERASER_RADIUS = 12;
 const PAGE_STEP = 650; // 「ページを伸ばす」で増える高さ
-const MIN_STEP2 = 64; // これより近い点は記録しない（座標は 10 倍の整数なので 0.8 の 2 乗 × 100）
+const MIN_STEP2 = 9; // これより近い点は記録しない（座標は 10 倍の整数。ページ幅 1000 に対して 0.3 未満の動き）
 const HISTORY_MAX = 50;
+const CORNER_COS = 0.35; // 向きの変化がこれより急（約 70 度以上の折れ）なら角として扱う
 const PEN_QUIET_MS = 1000; // ペンを離してからこの時間は、触れた手を無視する
 const PAN_START_PX = 10; // これ以上動いたらスクロール開始
 
@@ -25,11 +26,17 @@ const PEN_KEY = `${globalThis.PLANNER_NS || 'planner'}.pen`;
 export const pen = { seen: localStorage.getItem(PEN_KEY) === '1' };
 
 export function createInkPad({ onChange, onState, onPen }) {
-  const canvas = document.createElement('canvas');
-  canvas.className = 'ink-canvas';
-  canvas.setAttribute('role', 'img');
-  canvas.setAttribute('aria-label', '手書きメモ');
-  const ctx = canvas.getContext('2d');
+  // 2 枚重ね: base = 書き終えた線と罫線、live = いま書いている線の先端（次の点が来るたびに描き直す部分）
+  const el = document.createElement('div');
+  el.className = 'ink-canvas';
+  el.setAttribute('role', 'img');
+  el.setAttribute('aria-label', '手書きメモ');
+  const base = document.createElement('canvas');
+  const live = document.createElement('canvas');
+  live.className = 'ink-live';
+  el.append(base, live);
+  const bctx = base.getContext('2d');
+  const lctx = live.getContext('2d');
 
   let doc = null; // { key, h, strokes }
   let unit = 1; // ページ座標 1 あたりのキャンバスのピクセル数
@@ -39,120 +46,203 @@ export function createInkPad({ onChange, onState, onPen }) {
   let pan = null; // { id, scroller, y, t, v }
   let momentum = 0;
   let lastPen = 0;
+  let liveBox = null; // live に描いてある範囲（次に消す場所）
 
   // ---- 描画 ----
+  // 線は、記録した点を必ず通る曲線（Catmull-Rom）で結ぶ。角や細かい動きを丸めずに、書いたとおりの形にするため。
 
   const X = (p, i) => (p[i * 3] / 10) * unit;
   const Y = (p, i) => (p[i * 3 + 1] / 10) * unit;
-  /** 筆圧 0.5 で指定の太さ。弱いと細く、強いと太く */
-  const W = (s, i) => s.w * (0.45 + 1.1 * (s.p[i * 3 + 2] / 100)) * unit;
+  /** 筆圧 0.5 で指定の太さ。弱いと少し細く、強いと少し太く */
+  const W = (s, i) => s.w * (0.7 + 0.6 * (s.p[i * 3 + 2] / 100)) * unit;
 
-  function prepare(s) {
+  function prepare(ctx, s) {
     ctx.strokeStyle = ctx.fillStyle = COLORS[s.c] || COLORS[0];
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
   }
 
-  // 線は「点と点の中点」を結ぶ曲線（各点を制御点にする）でなめらかにする
-  function head(s) {
-    const p = s.p;
-    ctx.lineWidth = W(s, 0);
-    ctx.beginPath();
-    ctx.moveTo(X(p, 0), Y(p, 0));
-    ctx.lineTo((X(p, 0) + X(p, 1)) / 2, (Y(p, 0) + Y(p, 1)) / 2);
-    ctx.stroke();
-  }
-  function piece(s, i) {
-    const p = s.p;
-    ctx.lineWidth = W(s, i);
-    ctx.beginPath();
-    ctx.moveTo((X(p, i - 1) + X(p, i)) / 2, (Y(p, i - 1) + Y(p, i)) / 2);
-    ctx.quadraticCurveTo(X(p, i), Y(p, i), (X(p, i) + X(p, i + 1)) / 2, (Y(p, i) + Y(p, i + 1)) / 2);
-    ctx.stroke();
-  }
-  function tail(s) {
+  /**
+   * 点 i から点 i+1 までを描く。前後の点から曲がり具合を決める。
+   * ・行き過ぎないよう、曲げる強さは区間の半分まで
+   * ・急に向きが変わる点（文字の角・折り返し）では曲げず、角のまま残す
+   */
+  function segment(ctx, s, i) {
     const p = s.p;
     const n = p.length / 3;
-    ctx.lineWidth = W(s, n - 1);
+    const x1 = X(p, i);
+    const y1 = Y(p, i);
+    const x2 = X(p, i + 1);
+    const y2 = Y(p, i + 1);
+    const before = Math.max(i - 1, 0);
+    const after = Math.min(i + 2, n - 1);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    /** 点（px, py）での曲げ方。in = そこへ入ってくる向き、out = 出ていく向き */
+    const handle = (inX, inY, outX, outY) => {
+      const a = Math.hypot(inX, inY);
+      const b = Math.hypot(outX, outY);
+      if (!a || !b || (inX * outX + inY * outY) / (a * b) < CORNER_COS) return [0, 0];
+      let hx = (inX + outX) / 6;
+      let hy = (inY + outY) / 6;
+      const h = Math.hypot(hx, hy);
+      if (h > len / 2 && h > 0) {
+        hx *= len / 2 / h;
+        hy *= len / 2 / h;
+      }
+      return [hx, hy];
+    };
+    const [ax, ay] = handle(x1 - X(p, before), y1 - Y(p, before), dx, dy);
+    const [bx, by] = handle(dx, dy, X(p, after) - x2, Y(p, after) - y2);
+    ctx.lineWidth = (W(s, i) + W(s, i + 1)) / 2;
     ctx.beginPath();
-    ctx.moveTo((X(p, n - 2) + X(p, n - 1)) / 2, (Y(p, n - 2) + Y(p, n - 1)) / 2);
-    ctx.lineTo(X(p, n - 1), Y(p, n - 1));
+    ctx.moveTo(x1, y1);
+    ctx.bezierCurveTo(x1 + ax, y1 + ay, x2 - bx, y2 - by, x2, y2);
     ctx.stroke();
   }
-  function dot(s) {
+
+  function dot(ctx, s) {
     ctx.beginPath();
     ctx.arc(X(s.p, 0), Y(s.p, 0), Math.max(W(s, 0) / 2, 0.6), 0, Math.PI * 2);
     ctx.fill();
   }
 
-  function drawStroke(s) {
+  /** 線を描く。upTo を渡すと、その区間の手前まで（書いている途中の、形が確定した部分だけ） */
+  function drawStroke(ctx, s, upTo) {
     const n = Math.floor(s.p.length / 3);
     if (!n) return;
-    prepare(s);
-    if (n === 1) return dot(s);
-    head(s);
-    for (let i = 1; i < n - 1; i++) piece(s, i);
-    tail(s);
+    prepare(ctx, s);
+    if (n === 1) return dot(ctx, s);
+    const end = upTo ?? n - 1;
+    for (let i = 0; i < end; i++) segment(ctx, s, i);
+  }
+
+  function clearLive() {
+    if (!liveBox) return;
+    lctx.clearRect(...liveBox);
+    liveBox = null;
+  }
+
+  /** 書いている線の先端（最後の区間。次の点が来ると形が変わるので live 側に描く） */
+  function drawTip() {
+    clearLive();
+    const s = drawing.stroke;
+    const n = s.p.length / 3;
+    prepare(lctx, s);
+    if (n === 1) dot(lctx, s);
+    else segment(lctx, s, n - 2);
+    const i = Math.max(n - 2, 0);
+    const pad = W(s, n - 1) + 4;
+    const x0 = Math.min(X(s.p, i), X(s.p, n - 1)) - pad;
+    const y0 = Math.min(Y(s.p, i), Y(s.p, n - 1)) - pad;
+    liveBox = [x0, y0, Math.abs(X(s.p, i) - X(s.p, n - 1)) + pad * 2, Math.abs(Y(s.p, i) - Y(s.p, n - 1)) + pad * 2];
   }
 
   function redraw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    bctx.clearRect(0, 0, base.width, base.height);
+    lctx.clearRect(0, 0, live.width, live.height);
+    liveBox = null;
     if (!doc) return;
-    ctx.strokeStyle = RULE_COLOR;
-    ctx.lineWidth = Math.max(1, unit);
-    ctx.beginPath();
+    bctx.strokeStyle = RULE_COLOR;
+    bctx.lineWidth = Math.max(1, unit);
+    bctx.beginPath();
     for (let y = RULE_GAP; y < doc.h; y += RULE_GAP) {
-      ctx.moveTo(0, Math.round(y * unit) + 0.5);
-      ctx.lineTo(canvas.width, Math.round(y * unit) + 0.5);
+      bctx.moveTo(0, Math.round(y * unit) + 0.5);
+      bctx.lineTo(base.width, Math.round(y * unit) + 0.5);
     }
-    ctx.stroke();
-    doc.strokes.forEach(drawStroke);
-    if (drawing) drawStroke(drawing.stroke);
+    bctx.stroke();
+    doc.strokes.forEach(s => drawStroke(bctx, s));
+    if (drawing) {
+      const n = drawing.stroke.p.length / 3;
+      if (n > 2) drawStroke(bctx, drawing.stroke, n - 2);
+      drawTip();
+    }
   }
 
-  /** 表示サイズに合わせてキャンバスの解像度を決め直す */
+  /**
+   * 表示サイズに合わせてキャンバスの大きさと解像度を決め直す。
+   * 高さは幅から計算して px で指定する（縦と横の縮尺が必ず同じになり、ペン先と線がずれない）。
+   */
+  let shownWidth = 0;
   function resize() {
-    if (!doc || !canvas.isConnected) return;
-    const cssWidth = canvas.clientWidth;
+    if (!el.isConnected) return;
+    const cssWidth = el.clientWidth;
     if (!cssWidth) return;
+    const pageH = doc ? doc.h : 400;
+    const cssHeight = Math.round((cssWidth * pageH) / PAGE_W);
+    el.style.height = `${cssHeight}px`;
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     const width = Math.round(cssWidth * dpr);
-    const height = Math.round(((cssWidth * doc.h) / PAGE_W) * dpr);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
+    const height = Math.round(cssHeight * dpr);
+    for (const c of [base, live]) {
+      if (c.width !== width || c.height !== height) {
+        c.width = width;
+        c.height = height;
+      }
     }
+    shownWidth = cssWidth;
     unit = width / PAGE_W;
     redraw();
   }
-  new ResizeObserver(resize).observe(canvas);
+  new ResizeObserver(() => el.clientWidth !== shownWidth && resize()).observe(el);
 
   // ---- 入力 ----
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
-  /** 画面上の位置 → 記録する [x, y, 筆圧]（整数） */
+  /** 画面上の位置 → 記録する [x, y, 筆圧]（整数）。縦も横も「表示幅 = ページ幅 1000」の同じ縮尺で換算する */
   function point(e) {
-    const r = canvas.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * PAGE_W;
-    const y = ((e.clientY - r.top) / r.height) * doc.h;
+    const r = el.getBoundingClientRect();
+    const k = PAGE_W / r.width;
     const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
-    return [Math.round(clamp(x, 0, PAGE_W) * 10), Math.round(clamp(y, 0, doc.h) * 10), Math.round(clamp(pressure, 0.05, 1) * 100)];
+    return [
+      Math.round(clamp((e.clientX - r.left) * k, 0, PAGE_W) * 10),
+      Math.round(clamp((e.clientY - r.top) * k, 0, doc.h) * 10),
+      Math.round(clamp(pressure, 0.05, 1) * 100),
+    ];
+  }
+
+  /** 1 回の通知にまとめられた細かい動き（Apple Pencil は画面の更新より速く位置を送ってくる）を取り出す */
+  function samples(e) {
+    const list = e.getCoalescedEvents?.() || [];
+    const usable = list.length > 1 && list.every(v => Number.isFinite(v.clientX) && (v.clientX !== 0 || v.clientY !== 0));
+    return usable ? list : [e];
   }
 
   function addPoint(e) {
-    const p = drawing.stroke.p;
+    const s = drawing.stroke;
     const next = point(e);
-    const dx = next[0] - p[p.length - 3];
-    const dy = next[1] - p[p.length - 2];
-    if (dx * dx + dy * dy < MIN_STEP2) return;
-    p.push(...next);
-    // 増えた分だけ描き足す（毎回すべてを描き直さない）
-    const n = p.length / 3;
-    prepare(drawing.stroke);
-    if (n === 2) head(drawing.stroke);
-    else piece(drawing.stroke, n - 2);
-    tail(drawing.stroke);
+    const dx = next[0] - s.p[s.p.length - 3];
+    const dy = next[1] - s.p[s.p.length - 2];
+    if (dx * dx + dy * dy < MIN_STEP2) return false;
+    s.p.push(...next);
+    // 形が確定した区間（2 つ前の点まで）を base に描き足す。先端は live に描き直す
+    const n = s.p.length / 3;
+    if (n >= 3) {
+      prepare(bctx, s);
+      segment(bctx, s, n - 3);
+    }
+    return true;
+  }
+
+  function startStroke(e) {
+    drawing = { id: e.pointerId, stroke: { c: tool.color, w: WIDTHS[tool.width] || WIDTHS[0], p: point(e) } };
+    drawTip();
+  }
+
+  /** 書いている線を確定する */
+  function commitStroke() {
+    const s = drawing.stroke;
+    const n = s.p.length / 3;
+    clearLive();
+    prepare(bctx, s);
+    if (n === 1) dot(bctx, s);
+    else segment(bctx, s, n - 2);
+    remember(doc.strokes);
+    doc.strokes = [...doc.strokes, s];
+    drawing = null;
+    changed();
   }
 
   function eraseAt(e) {
@@ -161,6 +251,15 @@ export function createInkPad({ onChange, onState, onPen }) {
     if (next !== doc.strokes) {
       doc.strokes = next;
       redraw();
+    }
+  }
+
+  function endErase() {
+    const { before } = erasing;
+    erasing = null;
+    if (before !== doc.strokes) {
+      remember(before);
+      changed();
     }
   }
 
@@ -177,7 +276,7 @@ export function createInkPad({ onChange, onState, onPen }) {
   /** 指やペンがキャンバスの外へ出ても続きを受け取れるようにする（できない環境でも書けるよう、失敗は無視する） */
   function capture(e) {
     try {
-      canvas.setPointerCapture(e.pointerId);
+      el.setPointerCapture(e.pointerId);
     } catch {
       /* 取得できなくても、キャンバス上の動きは届く */
     }
@@ -212,7 +311,7 @@ export function createInkPad({ onChange, onState, onPen }) {
     onPen?.();
   }
 
-  canvas.addEventListener('pointerdown', e => {
+  el.addEventListener('pointerdown', e => {
     if (!doc) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     cancelAnimationFrame(momentum);
@@ -226,7 +325,9 @@ export function createInkPad({ onChange, onState, onPen }) {
       if (touches.size === (pen.seen ? 2 : 1)) startPan(e);
       return;
     }
-    if (drawing || erasing) return;
+    // 前の線の「離した」を取りこぼしていても、次の線は必ず書き始められるようにする
+    if (drawing) commitStroke();
+    if (erasing) endErase();
     if (e.pointerType === 'pen') {
       sawPen();
       lockScroll(true);
@@ -239,18 +340,17 @@ export function createInkPad({ onChange, onState, onPen }) {
       eraseAt(e);
       return;
     }
-    drawing = { id: e.pointerId, stroke: { c: tool.color, w: WIDTHS[tool.width] || WIDTHS[0], p: point(e) } };
-    prepare(drawing.stroke);
-    dot(drawing.stroke);
+    startStroke(e);
   });
 
-  canvas.addEventListener('pointermove', e => {
+  el.addEventListener('pointermove', e => {
     if (drawing?.id === e.pointerId) {
       if (e.pointerType === 'pen') lastPen = Date.now();
-      const events = e.getCoalescedEvents?.() || [];
-      for (const ev of events.length ? events : [e]) addPoint(ev);
+      let added = false;
+      for (const ev of samples(e)) added = addPoint(ev) || added;
+      if (added) drawTip();
     } else if (erasing?.id === e.pointerId) {
-      eraseAt(e);
+      for (const ev of samples(e)) eraseAt(ev);
     } else if (pan?.id === e.pointerId) {
       movePan(e);
     }
@@ -267,31 +367,25 @@ export function createInkPad({ onChange, onState, onPen }) {
         lastPen = Date.now();
         lockScroll(false);
       }
-      remember(doc.strokes);
-      doc.strokes = [...doc.strokes, drawing.stroke];
-      drawing = null;
-      changed();
+      if (e.type === 'pointerup') addPoint(e); // 離した位置まで線を届かせる
+      commitStroke();
     } else if (erasing?.id === e.pointerId) {
       if (e.pointerType === 'pen') {
         lastPen = Date.now();
         lockScroll(false);
       }
-      const { before } = erasing;
-      erasing = null;
-      if (before !== doc.strokes) {
-        remember(before);
-        changed();
-      }
+      endErase();
     }
   }
-  canvas.addEventListener('pointerup', finish);
-  canvas.addEventListener('pointercancel', finish);
+  el.addEventListener('pointerup', finish);
+  el.addEventListener('pointercancel', finish);
+  el.addEventListener('lostpointercapture', finish);
   window.addEventListener('blur', () => touches.clear());
 
   // ---- 指でのスクロール（キャンバス上ではブラウザのスクロールが効かないので、ここで動かす） ----
 
   function startPan(e) {
-    const scroller = canvas.closest('[data-ink-scroll]');
+    const scroller = el.closest('[data-ink-scroll]');
     if (!scroller) return;
     pan = { id: e.pointerId, scroller, y: e.clientY, y0: e.clientY, t: e.timeStamp, v: 0, moving: false };
   }
@@ -332,15 +426,14 @@ export function createInkPad({ onChange, onState, onPen }) {
   // ---- 外から使う操作 ----
 
   return {
-    el: canvas,
+    el,
     /** 表示するページを切り替える。null で何も表示しない（読み込み中） */
     show(next) {
       doc = next ? { key: next.key, h: next.h, strokes: next.strokes } : null;
       history = [];
       drawing = erasing = pan = null;
-      canvas.style.aspectRatio = doc ? `${PAGE_W} / ${doc.h}` : `${PAGE_W} / 600`;
-      if (doc) resize();
-      else redraw();
+      resize();
+      if (!el.isConnected) redraw();
       onState?.();
     },
     get busy() {
@@ -372,7 +465,6 @@ export function createInkPad({ onChange, onState, onPen }) {
     extend() {
       if (!doc || doc.h >= PAGE_H_MAX) return;
       doc.h = Math.min(doc.h + PAGE_STEP, PAGE_H_MAX);
-      canvas.style.aspectRatio = `${PAGE_W} / ${doc.h}`;
       resize();
       changed();
     },
